@@ -19,6 +19,14 @@ interface SignupData {
   intendedUse: ('GENERATOR' | 'RECEIVER')[];
 }
 
+interface SignupErrors {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  password?: string;
+  intendedUse?: string;
+}
+
 const steps = [
   { id: 1, title: 'Personal Info', icon: User },
   { id: 2, title: 'Account', icon: Mail },
@@ -35,13 +43,13 @@ export function SignupWizard() {
     password: '',
     intendedUse: [],
   });
-  const [errors, setErrors] = useState<Partial<SignupData>>({});
+  const [errors, setErrors] = useState<SignupErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { signup } = useAuth();
   const router = useRouter();
 
   const validateStep = (step: number): boolean => {
-    const newErrors: Partial<SignupData> = {};
+    const newErrors: SignupErrors = {};
 
     switch (step) {
       case 1:
@@ -57,7 +65,7 @@ export function SignupWizard() {
         else if (formData.password.length < 8) newErrors.password = 'Password must be at least 8 characters';
         break;
       case 4:
-        if (formData.intendedUse.length === 0) newErrors.intendedUse = ['Please select at least one option'];
+        if (formData.intendedUse.length === 0) newErrors.intendedUse = 'Please select at least one option';
         break;
     }
 
@@ -104,6 +112,10 @@ export function SignupWizard() {
         ? prev.intendedUse.filter(item => item !== option)
         : [...prev.intendedUse, option]
     }));
+    // Clear intendedUse error when toggled
+    if (errors.intendedUse) {
+      setErrors(prev => ({ ...prev, intendedUse: undefined }));
+    }
   };
 
   const renderStep = () => {
@@ -177,6 +189,9 @@ export function SignupWizard() {
             <div className="space-y-2">
               <Label>What do you intend to do with the app?</Label>
               <p className="text-sm text-muted-foreground mb-4">Select all that apply</p>
+              {errors.intendedUse && (
+                <p className="text-sm text-red-500">{errors.intendedUse}</p>
+              )}
               
               <div className="space-y-4">
                 <div className="flex items-center space-x-3 p-4 border rounded-lg hover:bg-muted/50 transition-colors">
