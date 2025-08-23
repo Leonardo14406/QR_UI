@@ -20,7 +20,7 @@ export default function HistoryPage() {
   const fetchHistory = React.useCallback(async () => {
     try {
       setIsLoading(true);
-      const response = await qrApi.getQRHistory();
+      const response = await qrApi.getHistory();
       // The backend returns { items: QRCodeResponse[] }
       setHistory(response.items || []);
     } catch (error) {

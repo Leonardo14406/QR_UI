@@ -31,6 +31,20 @@ export default function QRCodeDetail({ qrCode }: QRCodeDetailProps) {
     }
   };
 
+  // Get the correct title and content based on QR type
+  const getTitle = () => {
+    if (qrCode.title) return qrCode.title;
+    return isPageQR ? 'Page QR Code' : 'QR Code';
+  };
+
+  // Get the URL to display (only for page QR codes)
+  const getUrl = () => {
+    if (!isPageQR) return null;
+    return typeof qrCode.payload === 'string' ? qrCode.payload : qrCode.payload?.content;
+  };
+
+  const url = getUrl();
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -52,7 +66,7 @@ export default function QRCodeDetail({ qrCode }: QRCodeDetailProps) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             {isPageQR ? <FileText className="h-5 w-5" /> : <LinkIcon className="h-5 w-5" />}
-            {qrCode.title || 'QR Code Details'}
+            {getTitle()}
           </CardTitle>
           <CardDescription>
             {isPageQR ? 'Page QR Code' : 'Generic QR Code'}
@@ -90,27 +104,40 @@ export default function QRCodeDetail({ qrCode }: QRCodeDetailProps) {
             </div>
           </div>
 
-          {qrCode.url && (
+          {isPageQR && url && (
             <div className="space-y-2">
               <p className="text-sm font-medium text-muted-foreground">URL</p>
               <div className="flex items-center">
                 <a
-                  href={qrCode.url}
+                  href={url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center text-blue-600 hover:underline"
                 >
                   <ExternalLink className="mr-1 h-4 w-4" />
-                  {qrCode.url}
+                  {url}
                 </a>
               </div>
             </div>
           )}
 
-          {isPageQR && qrCode.payload?.description && (
+          {isPageQR && typeof qrCode.payload === 'object' && qrCode.payload && 'description' in qrCode.payload && qrCode.payload.description && (
             <div className="space-y-2">
               <p className="text-sm font-medium text-muted-foreground">Description</p>
               <p className="whitespace-pre-line">{qrCode.payload.description}</p>
+            </div>
+          )}
+
+          {!isPageQR && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-muted-foreground">Content</p>
+              <div className="p-4 bg-muted/50 rounded-md">
+                <pre className="whitespace-pre-wrap break-words">
+                  {typeof qrCode.payload === 'string' 
+                    ? qrCode.payload 
+                    : JSON.stringify(qrCode.payload, null, 2)}
+                </pre>
+              </div>
             </div>
           )}
         </CardContent>

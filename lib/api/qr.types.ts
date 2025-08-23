@@ -8,12 +8,12 @@ export interface BaseContentBlock {
 
 export interface TextContentBlock extends BaseContentBlock {
   type: 'heading' | 'paragraph';
-  text: string;
+  content: string;
 }
 
 export interface ImageContentBlock extends BaseContentBlock {
   type: 'image';
-  url: string;
+  content: string;
   alt?: string;
   width?: string;
   height?: string;
@@ -37,10 +37,10 @@ export interface QRPageContent {
 }
 
 export interface Creator {
-  id: string;
+  id?: string;
   firstName: string;
   lastName: string;
-  email: string;
+  email?: string;
 }
 
 export interface QRCodeResponse {
@@ -48,22 +48,43 @@ export interface QRCodeResponse {
   code: string;
   type: string;
   oneTime: boolean;
-  expiresAt?: string;
+  expiresAt: string | null;
   createdAt: string;
   pageId?: string;
   creator: Creator;
   url?: string; // Added URL field for site QR codes
   scannedAt?: string; // For scanned QR codes
   scanned?: boolean; // Whether the QR code was scanned by the user
-  isValid?: boolean; // Whether the QR code is still valid
-  validatedAt?: string; // When the QR code was validated
-  payload?: any; // The payload of the QR code
+  isValid: boolean; // Whether the QR code is still valid
+  validatedAt: string | null; // When the QR code was validated
+  payload: string | { content?: string; [key: string]: any }; // Relaxed payload shape
   title?: string; // Title for display in the UI
 }
 
 export interface GenerateQRResponse {
   qr: QRCodeResponse;
   url?: string;
+  message?: string;
+}
+
+// Result shape returned by validate/scan-image endpoints used by Scan page
+export interface HumanReadableScan {
+  id: string;
+  code: string;
+  payload: string | { content?: string; [key: string]: any };
+  type: string;
+  oneTime: boolean;
+  isValid: boolean;
+  createdAt: string;
+  validatedAt: string | null;
+  expiresAt: string | null;
+  creator: string;
+}
+
+export interface ScanResult {
+  qr: QRCodeResponse | null;
+  message: string;
+  humanReadable?: HumanReadableScan;
 }
 
 export interface GeneratePageQRParams {
@@ -74,7 +95,7 @@ export interface GeneratePageQRParams {
 }
 
 export interface GenerateSimpleQRParams {
-  payload: string;
+  payload: string | { content?: string; [key: string]: any };
   oneTime?: boolean;
   expiresAt?: string;
 }

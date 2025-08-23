@@ -8,7 +8,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { toPng } from 'html-to-image';
 import { format } from 'date-fns';
 import { qrApi } from '@/lib/api/qrClient';
-import { ContentBlock, TextContentBlock, ImageContentBlock, PageStyle, GenerateQRResponse } from '@/lib/api/qr.types';
+import { ContentBlock, TextContentBlock, ImageContentBlock, GenerateQRResponse } from '@/lib/api/qr.types';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -72,14 +72,7 @@ type QRFormValues = z.infer<typeof qrFormSchema> & {
   activeTab: 'simple' | 'advanced';
 };
 
-interface QRCodeResponse {
-  code: string;
-  id: string;
-  createdAt: string;
-  expiresAt?: string;
-  oneTime: boolean;
-  type: string;
-}
+//
 
 export default function CreatePage() {
   const [isLoading, setIsLoading] = useState(false);
@@ -129,7 +122,7 @@ export default function CreatePage() {
       const textBlock: TextContentBlock = {
         ...baseBlock,
         type,  // This is now properly narrowed to 'heading' | 'paragraph'
-        text: type === 'heading' ? 'New Heading' : 'Type your text here...'
+        content: type === 'heading' ? 'New Heading' : 'Type your text here...'
       };
       const currentBlocks = watch('siteContent.blocks') || [];
       setValue('siteContent.blocks', [...currentBlocks, textBlock]);
@@ -137,7 +130,7 @@ export default function CreatePage() {
       const imageBlock: ImageContentBlock = {
         ...baseBlock,
         type: 'image',
-        url: '',
+        content: '',
         alt: ''
       };
       const currentBlocks = watch('siteContent.blocks') || [];
@@ -172,22 +165,32 @@ export default function CreatePage() {
         console.log('[CreatePage] Generating generic QR...', {
           payload: (data as any).simplePayload,
           oneTime: data.oneTime,
-          expiresAt: data.expiresAt ? format(data.expiresAt, 'yyyy-MM-dd') : undefined,
+          expiresAt: data.expiresAt ? data.expiresAt.toISOString() : undefined,
         });
         const result = await qrApi.generateSimple({
           payload: (data as any).simplePayload || '',
           oneTime: data.oneTime,
-          expiresAt: data.expiresAt ? format(data.expiresAt, 'yyyy-MM-dd') : undefined,
+          expiresAt: data.expiresAt ? data.expiresAt.toISOString() : undefined,
         });
         console.log('[CreatePage] Generic QR generated:', result);
         setQrData(result);
         toast({ title: 'Success!', description: 'QR code generated successfully.' });
       } else {
+        // Client-side guard to match server validation in qrApi.generatePage
+        const siteBlocks = (data as any).siteContent?.blocks || [];
+        if (!siteBlocks.length) {
+          toast({
+            title: 'Add Content',
+            description: 'Please add at least one content block before generating a page QR.',
+            variant: 'destructive',
+          });
+          return;
+        }
         console.log('[CreatePage] Generating site QR...', (data as any).siteContent);
         const result = await qrApi.generatePage({
           title: (data as any).siteContent?.title,
           description: (data as any).siteContent?.description,
-          blocks: (data as any).siteContent?.blocks || [],
+          blocks: siteBlocks,
           style: (data as any).siteContent?.style,
         });
         console.log('[CreatePage] Site QR generated:', result);
@@ -210,12 +213,34 @@ export default function CreatePage() {
     if (!qrData) return;
 
     try {
-      const qrElement = document.getElementById('qr-code');
-      if (!qrElement) return;
-
-      const dataUrl = await toPng(qrElement);
+      const urlForQr = qrData?.url || qrData?.qr?.url || '';
+      let dataUrl: string;
+      if (urlForQr) {
+        try {
+          const QRCode = (await import('qrcode')).default;
+          dataUrl = await QRCode.toDataURL(urlForQr, { errorCorrectionLevel: 'H', margin: 2, width: 256 });
+        } catch {
+          const qrElement = document.getElementById('qr-code');
+          if (!qrElement) return;
+          dataUrl = await toPng(qrElement);
+        }
+      } else {
+        const qrElement = document.getElementById('qr-code');
+        if (!qrElement) return;
+        dataUrl = await toPng(qrElement);
+      }
       const link = document.createElement('a');
-      link.download = `qr-${qrData.qr.code}.png`;
+      // Use payload for generic QR filenames; fall back to code if needed
+      const rawPayload = qrData.qr?.payload as any;
+      const payloadStr = typeof rawPayload === 'string'
+        ? rawPayload
+        : (rawPayload?.content ?? 'payload');
+      const safeName = String(payloadStr)
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-zA-Z0-9-_]/g, '')
+        .slice(0, 40) || 'qr';
+      link.download = `qr-${safeName}.png`;
       link.href = dataUrl;
       link.click();
     } catch (error) {
@@ -240,8 +265,8 @@ export default function CreatePage() {
           <div className="space-y-2">
             <Label>Heading Text</Label>
             <Input
-              value={block.text}
-              onChange={(e) => updateBlock(block.id, { ...block, text: e.target.value })}
+              value={(block as any).content}
+              onChange={(e) => updateBlock(block.id, { content: e.target.value } as any)}
               className="text-2xl font-bold"
             />
             <div className="flex items-center space-x-4 mt-2">
@@ -252,9 +277,8 @@ export default function CreatePage() {
                   id={`${block.id}-color`}
                   value={block.style?.color || '#000000'}
                   onChange={(e) => updateBlock(block.id, {
-                    ...block,
-                    style: { ...block.style, color: e.target.value }
-                  })}
+                    style: { ...(block.style || {}), color: e.target.value }
+                  } as any)}
                   className="h-8 w-8 p-0 border-0"
                 />
               </div>
@@ -264,9 +288,8 @@ export default function CreatePage() {
                   id={`${block.id}-align`}
                   value={block.style?.textAlign || 'left'}
                   onChange={(e) => updateBlock(block.id, {
-                    ...block,
-                    style: { ...block.style, textAlign: e.target.value as any }
-                  })}
+                    style: { ...(block.style || {}), textAlign: e.target.value as any }
+                  } as any)}
                   className="rounded-md border border-input px-2 py-1 text-sm"
                 >
                   <option value="left">Left</option>
@@ -284,8 +307,8 @@ export default function CreatePage() {
           <div className="space-y-2">
             <Label>Paragraph Text</Label>
             <textarea
-              value={block.text}
-              onChange={(e) => updateBlock(block.id, { ...block, text: e.target.value })}
+              value={(block as any).content}
+              onChange={(e) => updateBlock(block.id, { content: e.target.value } as any)}
               className="w-full min-h-[100px] p-2 border rounded"
             />
             <div className="flex items-center space-x-4">
@@ -308,9 +331,8 @@ export default function CreatePage() {
                   id={`${block.id}-size`}
                   value={block.style?.fontSize || '1rem'}
                   onChange={(e) => updateBlock(block.id, {
-                    ...block,
-                    style: { ...block.style, fontSize: e.target.value }
-                  })}
+                    style: { ...(block.style || {}), fontSize: e.target.value }
+                  } as any)}
                   className="rounded-md border border-input px-2 py-1 text-sm"
                 >
                   <option value="0.875rem">Small</option>
@@ -328,8 +350,8 @@ export default function CreatePage() {
             <Label>Image URL</Label>
             <div className="flex space-x-2">
               <Input
-                value={block.url}
-                onChange={(e) => updateBlock(block.id, { ...block, url: e.target.value })}
+                value={(block as any).content}
+                onChange={(e) => updateBlock(block.id, { content: e.target.value } as any)}
                 placeholder="https://example.com/image.jpg"
               />
               <Button
@@ -338,18 +360,18 @@ export default function CreatePage() {
                 onClick={() => {
                   // This would open a file upload dialog in a real app
                   const url = prompt('Enter image URL:');
-                  if (url) updateBlock(block.id, { ...block, url });
+                  if (url) updateBlock(block.id, { content: url } as any);
                 }}
               >
                 Upload
               </Button>
             </div>
-            {block.url && (
+            {(block as any).content && (
               <div className="mt-2">
                 <Label>Preview</Label>
                 <div className="mt-1 border rounded p-2">
                   <img 
-                    src={block.url} 
+                    src={(block as any).content} 
                     alt={block.alt || 'Image preview'} 
                     className="max-w-full h-auto max-h-40 mx-auto"
                   />
@@ -364,9 +386,8 @@ export default function CreatePage() {
                   type="text"
                   value={block.style?.width || '100%'}
                   onChange={(e) => updateBlock(block.id, {
-                    ...block,
-                    style: { ...block.style, width: e.target.value }
-                  })}
+                    style: { ...(block.style || {}), width: e.target.value }
+                  } as any)}
                   placeholder="e.g., 100% or 300px"
                 />
               </div>
@@ -376,9 +397,8 @@ export default function CreatePage() {
                   id={`${block.id}-fit`}
                   value={block.style?.objectFit || 'contain'}
                   onChange={(e) => updateBlock(block.id, {
-                    ...block,
-                    style: { ...block.style, objectFit: e.target.value as any }
-                  })}
+                    style: { ...(block.style || {}), objectFit: e.target.value as any }
+                  } as any)}
                   className="w-full rounded-md border border-input px-2 py-1 text-sm"
                 >
                   <option value="contain">Contain</option>
@@ -724,7 +744,7 @@ export default function CreatePage() {
                 >
                   {qrData?.qr ? (
                     <QRCodeSVG 
-                      value={qrData.qr.type === 'page' ? qrData.qr.url || '' : qrData.qr.code} 
+                      value={qrData.qr.type === 'page' ? (qrData.url || qrData.qr.url || '') : qrData.qr.code} 
                       size={128} 
                       level="H"
                       includeMargin={true}

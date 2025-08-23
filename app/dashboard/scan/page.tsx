@@ -7,48 +7,10 @@ import { Button } from '@/components/ui/button';
 import { Scan, Camera, Upload, StopCircle, Loader2 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { qrApi } from '@/lib/api/qrClient';
+import type { ScanResult, HumanReadableScan } from '@/lib/api/qr.types';
 import jsQR from 'jsqr';
 
-interface HumanReadable {
-  id: string;
-  code: string;
-  payload: string;
-  type: 'generic';
-  oneTime: boolean;
-  isValid: boolean;
-  createdAt: string;
-  validatedAt: string | null;
-  expiresAt: string | null;
-  creator: string;
-}
-
-interface ScanResult {
-  qr: {
-    id: string;
-    code: string;
-    payload: string | { content: string };
-    type: string;
-    oneTime: boolean;
-    isValid: boolean;
-    createdAt: string;
-    validatedAt: string | null;
-    expiresAt: string | null;
-    creator: { firstName: string; lastName: string };
-  } | null;
-  message: string;
-  humanReadable?: {
-    id: string;
-    code: string;
-    payload: string;
-    type: string;
-    oneTime: boolean;
-    isValid: boolean;
-    createdAt: string;
-    validatedAt: string | null;
-    expiresAt: string | null;
-    creator: string;
-  };
-}
+// Using shared ScanResult from lib/api/qr.types
 
 export default function ScanPage() {
   const { toast } = useToast();
@@ -61,7 +23,7 @@ export default function ScanPage() {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [recentScans, setRecentScans] = useState<HumanReadable[]>([]);
+  const [recentScans, setRecentScans] = useState<HumanReadableScan[]>([]);
   const lastDecodedRef = useRef<string | null>(null);
   const lastDecodeAtRef = useRef<number>(0);
 
@@ -102,11 +64,16 @@ export default function ScanPage() {
         return;
       }
 
+      // Normalize payload to string for display
+      const payloadStr = typeof data.humanReadable.payload === 'string'
+        ? data.humanReadable.payload
+        : (data.humanReadable.payload?.content ?? JSON.stringify(data.humanReadable.payload ?? '')) || 'N/A';
+
       // Ensure all required fields are present
-      const humanReadable: HumanReadable = {
+      const humanReadable: HumanReadableScan = {
         id: data.humanReadable.id,
         code: data.humanReadable.code,
-        payload: data.humanReadable.payload || 'N/A',
+        payload: payloadStr,
         type: 'generic',
         oneTime: data.humanReadable.oneTime,
         isValid: data.humanReadable.isValid,
@@ -252,10 +219,14 @@ export default function ScanPage() {
         return;
       }
   
-      const humanReadable: HumanReadable = {
+      const payloadStr2 = typeof data.humanReadable.payload === 'string'
+        ? data.humanReadable.payload
+        : (data.humanReadable.payload?.content ?? JSON.stringify(data.humanReadable.payload ?? '')) || 'N/A';
+
+      const humanReadable: HumanReadableScan = {
         id: data.humanReadable.id,
         code: data.humanReadable.code,
-        payload: data.humanReadable.payload || 'N/A',
+        payload: payloadStr2,
         type: 'generic',
         oneTime: data.humanReadable.oneTime,
         isValid: data.humanReadable.isValid,
@@ -427,7 +398,7 @@ export default function ScanPage() {
                       <div className="mt-3 text-sm">
                         <div className="text-muted-foreground">Payload</div>
                         <pre className="mt-1 whitespace-pre-wrap break-words bg-muted/30 p-2 rounded text-foreground">
-                          {scan.payload}
+                          {typeof scan.payload === 'string' ? scan.payload : JSON.stringify(scan.payload ?? '', null, 2)}
                         </pre>
                       </div>
                     )}

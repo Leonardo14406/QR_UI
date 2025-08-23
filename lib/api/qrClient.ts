@@ -1,278 +1,224 @@
-import { GeneratePageQRParams, GenerateSimpleQRParams, GenerateQRResponse, QRHistoryResponse, QRCodeResponse } from './qr.types';
+// lib/api/qrClient.ts
+"use client";
 import { authService } from '../auth';
-import { cookies } from 'next/headers';
+import { QRCodeResponse, GenerateQRResponse, GeneratePageQRParams, GenerateSimpleQRParams, QRHistoryResponse, ScanResult } from "./qr.types";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5555';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5555";
+const DEBUG = process.env.NODE_ENV !== "production";
 
-async function fetchWithAuth<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const isServer = typeof window === "undefined";
-  console.log(`[fetchWithAuth] Starting request to ${url} (${isServer ? 'server' : 'client'})`);
+// Track if we're already refreshing the token
+let isRefreshing = false;
+
+// Helper function to handle token refresh
+async function refreshAuthToken(): Promise<string | null> {
+  // Prevent multiple simultaneous refresh attempts
+  if (isRefreshing) {
+    // Wait for the ongoing refresh to complete
+    return new Promise((resolve) => {
+      const checkRefresh = () => {
+        if (!isRefreshing) {
+          resolve(localStorage.getItem("accessToken"));
+        } else {
+          setTimeout(checkRefresh, 100);
+        }
+      };
+      checkRefresh();
+    });
+  }
+
+  isRefreshing = true;
   
-  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
-  const headers = new Headers();
-  // Only set JSON content type when not sending FormData (browser will set multipart boundary automatically)
-  if (!isFormData) {
-    headers.set('Content-Type', 'application/json');
-  }
-
-  // Merge custom headers
-  if (options.headers) {
-    if (options.headers instanceof Headers) {
-      options.headers.forEach((value, key) => headers.set(key, value));
-    } else if (Array.isArray(options.headers)) {
-      options.headers.forEach(([key, value]) => headers.set(key, value));
-    } else {
-      Object.entries(options.headers).forEach(([key, value]) =>
-        headers.set(key, value as string)
-      );
-    }
-  }
-
-  // Get access token (server vs client)
-  let accessToken: string | null = null;
-  if (isServer) {
-    console.log('[fetchWithAuth] Server-side token check');
-    try {
-      // For server-side requests, we need to pass the cookie header manually
-      const { cookies } = await import("next/headers");
-      const cookieStore = cookies();
-      accessToken = cookieStore.get("accessToken")?.value || null;
-      
-      console.log('[fetchWithAuth] Server token check:', {
-        hasToken: !!accessToken,
-        tokenLength: accessToken?.length,
-        availableCookies: cookieStore.getAll().map(c => c.name)
-      });
-      
-      // For server-side requests, we need to include cookies in the fetch
-      if (accessToken) {
-        headers.set('Cookie', `accessToken=${accessToken}`);
-      }
-    } catch (error) {
-      console.error('[fetchWithAuth] Error getting server token:', error);
-    }
-  } else {
-    console.log('[fetchWithAuth] Client-side token check');
-    try {
-      accessToken = await authService.getAccessToken();
-      console.log(`[fetchWithAuth] Client token: ${accessToken ? 'found' : 'not found'}`);
-    } catch (error) {
-      console.error("[fetchWithAuth] Error getting client access token:", error);
-    }
-  }
-
-  if (accessToken) {
-    console.log('[fetchWithAuth] Setting Authorization header');
-    headers.set("Authorization", `Bearer ${accessToken}`);
-  } else {
-    console.log('[fetchWithAuth] No access token available');
-  }
-
-  // Log request details
-  console.log(`[fetchWithAuth] Making request to: ${url}`, {
-    method: options?.method || 'GET',
-    headers: Object.fromEntries(headers.entries()),
-    hasBody: !!options?.body,
-    isServer
-  });
-
-  // First request
-  let response;
   try {
-    response = await fetch(url, {
-      ...options,
-      headers,
-      credentials: 'include',
-    });
-    
-    console.log(`[fetchWithAuth] Response status: ${response.status} ${response.statusText}`, {
-      url: response.url,
-      redirected: response.redirected,
-      type: response.type,
-      headers: Object.fromEntries(response.headers.entries())
-    });
+    const response = await authService.refreshToken();
+    if (response?.accessToken) {
+      localStorage.setItem("accessToken", response.accessToken);
+      return response.accessToken;
+    }
+    return null;
   } catch (error) {
-    console.error('[fetchWithAuth] Network error during fetch:', error);
-    throw new Error(`Network error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    console.error('Token refresh failed:', error);
+    localStorage.removeItem("accessToken");
+    return null;
+  } finally {
+    isRefreshing = false;
   }
-
-  // Handle expired token (401)
-  if (response.status === 401) {
-    console.log('[fetchWithAuth] Received 401, attempting token refresh');
-    
-    try {
-      if (isServer) {
-        console.log('[fetchWithAuth] Cannot refresh token on server, redirecting to login');
-        throw new Error('Session expired. Please log in again.');
-      }
-      
-      console.log(`[fetchWithAuth] Attempting to refresh token at ${API_BASE_URL}/auth/refresh`);
-      
-      // Client-side token refresh
-      const refreshResponse = await fetch(`${API_BASE_URL}/auth/refresh`, {
-        method: 'POST',
-        credentials: 'include', // This will send the httpOnly refresh token cookie
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      console.log(`[fetchWithAuth] Refresh response status: ${refreshResponse.status}`);
-      
-      if (!refreshResponse.ok) {
-        const errorText = await refreshResponse.text().catch(() => 'Could not read error response');
-        console.error(`[fetchWithAuth] Refresh failed with status ${refreshResponse.status}:`, errorText);
-        throw new Error(`Failed to refresh session: ${errorText}`);
-      }
-
-      const refreshData = await refreshResponse.json().catch(e => {
-        console.error('[fetchWithAuth] Failed to parse refresh response:', e);
-        throw new Error('Invalid response from authentication server');
-      });
-      
-      console.log('[fetchWithAuth] Token refresh successful');
-      const { accessToken } = refreshData;
-      
-      if (!accessToken) {
-        console.error('[fetchWithAuth] No access token in refresh response:', refreshData);
-        throw new Error('No access token received from refresh endpoint');
-      }
-      
-      // Update the access token in localStorage for client-side use
-      localStorage.setItem('accessToken', accessToken);
-      console.log('[fetchWithAuth] Updated access token in localStorage');
-      
-      // Retry the original request with the new token
-      headers.set('Authorization', `Bearer ${accessToken}`);
-      console.log('[fetchWithAuth] Retrying original request with new token');
-      
-      response = await fetch(url, {
-        ...options,
-        headers,
-        credentials: 'include',
-      });
-      
-      console.log(`[fetchWithAuth] Retry response status: ${response.status}`);
-      
-    } catch (error) {
-      console.error('[fetchWithAuth] Token refresh failed:', error);
-      // Clear auth state and redirect to login
-      if (typeof window !== 'undefined') {
-        console.log('[fetchWithAuth] Clearing auth state and redirecting to login');
-        localStorage.removeItem('accessToken');
-        window.location.href = '/login?error=session_expired';
-      }
-      throw new Error('Your session has expired. Please log in again.');
-    }
-  }
-
-  // Handle errors (read body once)
-  if (!response.ok) {
-    let errorMessage = `Request failed with status ${response.status} ${response.statusText}`;
-    try {
-      const errorData = await response.json();
-      errorMessage = errorData.message || errorMessage;
-    } catch {
-      try{
-        const errorText = await response.text();
-        if (errorText) errorMessage = errorText;
-      }catch{
-        //ignore
-      }
-    }
-
-    console.error("API Error:", {
-      url,
-      status: response.status,
-      statusText: response.statusText,
-      error: errorMessage,
-    });
-
-    throw new Error(errorMessage);
-  }
-
-  // Success → read JSON once
-  return response.json();
 }
 
+export async function fetchWithAuth<T>(url: string, options: RequestInit = {}): Promise<T> {
+  // Skip token refresh for auth-related endpoints
+  const isAuthRequest = url.includes('/auth/');
+  
+  const headers = new Headers(options.headers || {});
+  if (!(options.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
+  
+  // Get access token from localStorage if this isn't an auth request
+  let token = isAuthRequest ? null : localStorage.getItem("accessToken");
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  // Helper function to make the actual fetch call
+  const doFetch = async (): Promise<Response> => {
+    return fetch(url, { 
+      ...options, 
+      headers,
+      credentials: 'include', // This ensures cookies (including refresh token) are sent with the request
+      mode: 'cors', // Ensure CORS mode is set
+      // Ensure the request is made with credentials
+      cache: 'no-store',
+      redirect: 'follow',
+      referrerPolicy: 'no-referrer'
+    });
+  };
+
+  // Initial request
+  let res = await doFetch();
+
+  // If unauthorized and not already trying to refresh, try to refresh the token
+  if (res.status === 401 && !isAuthRequest) {
+    if (DEBUG) console.log("[fetchWithAuth] Attempting to refresh token...");
+    
+    const newToken = await refreshAuthToken();
+    
+    if (newToken) {
+      // Update the Authorization header with the new token
+      headers.set("Authorization", `Bearer ${newToken}`);
+      
+      // Retry the original request with the new token
+      res = await doFetch();
+      
+      // If still unauthorized after refresh, clear tokens and redirect
+      if (res.status === 401) {
+        localStorage.removeItem("accessToken");
+        if (typeof window !== 'undefined') {
+          window.location.href = '/login';
+        }
+        throw new Error('Session expired. Please log in again.');
+      }
+    } else {
+      // If no access token was returned, clear tokens and redirect to login
+      localStorage.removeItem("accessToken");
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login';
+      }
+      throw new Error('Session expired. Please log in again.');
+    }
+  }
+
+  const text = await res.text();
+  let data: any;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    throw new Error(`[fetchWithAuth] ${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
+  }
+  return data as T;
+}
 export const qrApi = {
-  // Generate a simple QR code
   async generateSimple(params: GenerateSimpleQRParams): Promise<GenerateQRResponse> {
-    const user = await authService.getCurrentUser(await authService.getAccessToken() || "");
-    const creatorName = user ? `${user.firstName} ${user.lastName}`.trim() : "Unknown";
+    try {
+      // Validate expiresAt if provided (ISO 8601)
+      if (params.expiresAt) {
+        const d = new Date(params.expiresAt);
+        const valid = !isNaN(d.getTime()) && params.expiresAt === d.toISOString();
+        if (!valid) {
+          throw new Error("expiresAt must be a valid ISO date string");
+        }
+      }
 
-    const res = await fetchWithAuth<{ qr: QRCodeResponse }>(`${API_BASE_URL}/qr/generate`, {
-      method: "POST",
-      body: JSON.stringify({
-        payload: typeof params.payload === "string" 
-          ? { content: params.payload } 
-          : params.payload,
-        type: "generic",
-        oneTime: params.oneTime,
-        expiresAt: params.expiresAt,
-        creator: creatorName,
-      }),
-    });
-
-    // Return wrapped object to match GenerateQRResponse used by UI
-    return { qr: res.qr };
+      const res = await fetchWithAuth<GenerateQRResponse>(`${API_BASE_URL}/qr/generate`, {
+        method: "POST",
+        body: JSON.stringify(params),
+      });
+      return res;
+    } catch (e: any) {
+      const msg = e?.message || "Failed to generate QR code";
+      throw new Error(msg);
+    }
   },
 
-  // Generate a page QR code with rich content
   async generatePage(params: GeneratePageQRParams): Promise<GenerateQRResponse> {
-    return fetchWithAuth(`${API_BASE_URL}/qr/generate-page`, {
-      method: 'POST',
-      body: JSON.stringify({
-        title: params.title,
-        description: params.description,
-        blocks: params.blocks,
-        style: params.style,
-      }),
-    });
+    try {
+      if (!params.blocks?.length) {
+        throw new Error("At least one content block is required");
+      }
+      const res = await fetchWithAuth<GenerateQRResponse>(`${API_BASE_URL}/qr/generate-page`, {
+        method: "POST",
+        body: JSON.stringify(params),
+      });
+      const url = (res as any)?.url ?? (res as any)?.qr?.url;
+      if (!url) {
+        throw new Error("No URL returned for QR code");
+      }
+      return res;
+    } catch (e: any) {
+      const msg = e?.message || "Failed to generate page QR code";
+      throw new Error(msg);
+    }
   },
 
-  // Get QR code details
-  async getQRCode(id: string): Promise<any> {
-    return fetchWithAuth(`${API_BASE_URL}/qr/history/${id}`, {
-      method: 'GET',
-    });
+  async getQRCode(id: string, token?: string): Promise<QRCodeResponse> {
+    try {
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : undefined;
+      return await fetchWithAuth<QRCodeResponse>(`${API_BASE_URL}/qr/history/${id}`, {
+        headers
+      });
+    } catch (e: any) {
+      const msg = e?.message || "Failed to fetch QR code";
+      throw new Error(msg);
+    }
   },
 
-  // Delete a QR code
-  async deleteQRCode(id: string): Promise<void> {
-    return fetchWithAuth(`${API_BASE_URL}/qr/history/${id}`, {
-      method: 'DELETE',
-    });
-  },
-  
-  // Get QR code history for the current user
-  async getQRHistory(): Promise<QRHistoryResponse> {
-    return fetchWithAuth<QRHistoryResponse>(`${API_BASE_URL}/qr/history`);
-  },
-
-  // Get all QR code IDs for static generation
-  async getAllQRCodeIds(): Promise<{ id: string }[]> {
-    const history = await this.getQRHistory();
-    return history.items.map(item => ({ id: item.id }));
-  },
-  
-  // Validate a QR code (new method, since backend supports it)
-  async validateQRCode(code: string): Promise<any> {
-    return fetchWithAuth(`${API_BASE_URL}/qr/validate`, {
-      method: "POST",
-      body: JSON.stringify({ code }),
-    });
+  async deleteQRCode(id: string): Promise<{ message: string }> {
+    try {
+      return await fetchWithAuth<{ message: string }>(`${API_BASE_URL}/qr/history/${id}`, {
+        method: "DELETE",
+      });
+    } catch (e: any) {
+      const msg = e?.message || "Failed to delete QR code";
+      throw new Error(msg);
+    }
   },
 
-  // Scan an uploaded image containing a QR code
-  async scanImage(file: File): Promise<any> {
-    const form = new FormData();
-    form.append('image', file);
-    return fetchWithAuth(`${API_BASE_URL}/qr/scan-image`, {
-      method: 'POST',
-      body: form,
-    });
+  async getHistory(): Promise<QRHistoryResponse> {
+    try {
+      return await fetchWithAuth<QRHistoryResponse>(`${API_BASE_URL}/qr/history`);
+    } catch (e: any) {
+      const msg = e?.message || "Failed to fetch history";
+      throw new Error(msg);
+    }
   },
-};
 
+  async validateQRCode(code: string): Promise<ScanResult> {
+    try {
+      return await fetchWithAuth<ScanResult>(`${API_BASE_URL}/qr/validate`, {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      });
+    } catch (e: any) {
+      const msg = e?.message || "Failed to validate QR code";
+      throw new Error(msg);
+    }
+  },
+
+  async scanImage(file: File): Promise<ScanResult> {
+    try {
+      const formData = new FormData();
+      formData.append("image", file); // must match backend field name
+
+      return await fetchWithAuth<ScanResult>(`${API_BASE_URL}/qr/scan-image`, {
+        method: "POST",
+        body: formData,
+      });
+    } catch (e: any) {
+      const msg = e?.message || "Failed to scan image";
+      throw new Error(msg);
+    }
+  },
+}
 

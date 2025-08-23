@@ -1,15 +1,9 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { jwtDecode } from 'jwt-decode';
 import { User, authService } from '@/lib/auth';
-
-// Utility to set cookies client-side
-function setCookie(name: string, value: string, days: number) {
-  const expires = new Date();
-  expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
-  document.cookie = `${name}=${value};expires=${expires.toUTCString()};path=/;SameSite=Lax`;
-}
 
 interface AuthContextType {
   user: User | null;
@@ -25,100 +19,110 @@ interface AuthContextType {
   }) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  refreshToken: () => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+// Utility: decode JWT expiry using robust library
+function decodeJwt(token: string): { exp: number } {
+  try {
+    const decoded = jwtDecode<{ exp: number }>(token);
+    return { exp: decoded.exp };
+  } catch (e) {
+    throw new Error('Invalid JWT token');
+  }
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Auto-refresh token mechanism
-  useEffect(() => {
-    let refreshInterval: NodeJS.Timeout;
-
-    const scheduleTokenRefresh = () => {
-      // Refresh token every 14 minutes (assuming 15-minute token expiry)
-      refreshInterval = setInterval(async () => {
-        if (accessToken) {
-          try {
-            const response = await authService.refreshToken();
-            setAccessToken(response.accessToken);
-          } catch (error) {
-            console.error('Token refresh failed:', error);
-            // If refresh fails, log out user
-            setAccessToken(null);
-            setUser(null);
-          }
-        }
-      }, 14 * 60 * 1000); // 14 minutes
-    };
-
-    if (accessToken) {
-      scheduleTokenRefresh();
-    }
-
-    return () => {
-      if (refreshInterval) {
-        clearInterval(refreshInterval);
-      }
-    };
-  }, [accessToken]);
-
   const router = useRouter();
+  const pathname = usePathname();
 
-  // Helper function to redirect based on user role
+  // Redirect helper
   const redirectBasedOnRole = (user: User) => {
     if (!user) return;
-    
-    // Debug log to check user data
-    console.log('User role check:', {
-      intendedUse: user.intendedUse,
-      hasGenerator: user.intendedUse?.includes('GENERATOR'),
-      hasReceiver: user.intendedUse?.includes('RECEIVER')
-    });
-
-    // Only redirect if we're not already on the correct page
-    const currentPath = window.location.pathname;
     const isGenerator = user.intendedUse?.includes('GENERATOR') ?? false;
     const targetPath = isGenerator ? '/dashboard' : '/dashboard/my-qr';
-    
-    console.log(`Redirecting ${user.email} (${isGenerator ? 'GENERATOR' : 'RECEIVER'}) to ${targetPath}`);
-    
-    if (currentPath !== targetPath) {
-      // Use Next.js router for client-side navigation
+    if (pathname !== targetPath) {
       router.push(targetPath);
     }
   };
 
-  // Initialize auth state
+  // Schedule token refresh based on JWT exp
+  const scheduleTokenRefresh = (token: string) => {
+    try {
+      const { exp } = decodeJwt(token);
+      const expiresIn = exp * 1000 - Date.now();
+      const refreshAt = expiresIn - 60_000; // refresh 1 min early
+      if (refreshAt > 0) {
+        setTimeout(async () => {
+          try {
+            const response = await authService.refreshToken();
+            setAccessToken(response.accessToken);
+            scheduleTokenRefresh(response.accessToken); // reschedule
+          } catch (err) {
+            console.error('Token refresh failed:', err);
+            setAccessToken(null);
+            setUser(null);
+          }
+        }, refreshAt);
+      }
+    } catch (err) {
+      console.error('Failed to decode token', err);
+    }
+  };
+
+  // Centralized token refresh function
+  const refreshToken = async (): Promise<string | null> => {
+    try {
+      const response = await authService.refreshToken();
+      if (response?.accessToken) {
+        // Store the token in localStorage for fetchWithAuth
+        localStorage.setItem("accessToken", response.accessToken);
+        
+        // Update state
+        setAccessToken(response.accessToken);
+        scheduleTokenRefresh(response.accessToken);
+        
+        // Update user data
+        try {
+          const currentUser = await authService.getCurrentUser(response.accessToken);
+          setUser(currentUser);
+        } catch (userError) {
+          console.error('Failed to fetch user data:', userError);
+          // Don't fail the whole refresh if user fetch fails
+        }
+        
+        return response.accessToken;
+      }
+      return null;
+    } catch (error) {
+      console.error('Token refresh failed:', error);
+      // Clear any invalid tokens
+      localStorage.removeItem("accessToken");
+      setAccessToken(null);
+      setUser(null);
+      return null;
+    }
+  };
+
+  // Initialize auth state on mount
   useEffect(() => {
     const initAuth = async () => {
       try {
-        // Try to refresh token on app load
-        const response = await authService.refreshToken();
-        setAccessToken(response.accessToken);
-        
-        // Store token in localStorage for API client
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('accessToken', response.accessToken);
-        }
-        
-        // Get current user
-        const currentUser = await authService.getCurrentUser(response.accessToken);
-        setUser(currentUser);
-        
-        // Redirect based on user role
-        redirectBasedOnRole(currentUser);
-      } catch (error) {
-        // No valid refresh token, user needs to log in
+        await refreshToken();
+      } catch (err) {
         console.log('No valid session found');
+        setUser(null);
+        setAccessToken(null);
       } finally {
         setIsLoading(false);
       }
     };
-
     initAuth();
   }, []);
 
@@ -126,12 +130,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const response = await authService.login(email, password);
       setAccessToken(response.accessToken);
-      
-      // Get current user info
+      scheduleTokenRefresh(response.accessToken);
+
       const currentUser = await authService.getCurrentUser(response.accessToken);
       setUser(currentUser);
-      
-      // Redirect based on user role
+
       redirectBasedOnRole(currentUser);
     } catch (error) {
       throw error;
@@ -148,13 +151,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const response = await authService.signup(data);
       setAccessToken(response.accessToken);
-      if (response.user) {
-        setUser(response.user);
-      } else {
-        // Get current user info if not included in signup response
-        const currentUser = await authService.getCurrentUser(response.accessToken);
-        setUser(currentUser);
-      }
+      scheduleTokenRefresh(response.accessToken);
+
+      const currentUser = response.user 
+        ? response.user 
+        : await authService.getCurrentUser(response.accessToken);
+      setUser(currentUser);
+
+      redirectBasedOnRole(currentUser);
     } catch (error) {
       throw error;
     }
@@ -162,12 +166,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
-      await authService.logout();
+      await authService.logout(); // backend clears refresh cookie
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
       setAccessToken(null);
       setUser(null);
+      router.push('/login');
     }
   };
 
@@ -182,6 +187,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  if (isLoading) {
+    return <div className="flex items-center justify-center h-screen">Loading...</div>;
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -192,6 +201,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signup,
         logout,
         refreshUser,
+        refreshToken,
       }}
     >
       {children}
@@ -201,7 +211,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (context === undefined) {
+  if (!context) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;
