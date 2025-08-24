@@ -24,14 +24,10 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Utility: decode JWT expiry using robust library
+// Utility: decode JWT expiry
 function decodeJwt(token: string): { exp: number } {
-  try {
-    const decoded = jwtDecode<{ exp: number }>(token);
-    return { exp: decoded.exp };
-  } catch (e) {
-    throw new Error('Invalid JWT token');
-  }
+  const decoded = jwtDecode<{ exp: number }>(token);
+  return { exp: decoded.exp };
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -42,17 +38,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
 
-  // Redirect helper
   const redirectBasedOnRole = (user: User) => {
     if (!user) return;
     const isGenerator = user.intendedUse?.includes('GENERATOR') ?? false;
     const targetPath = isGenerator ? '/dashboard' : '/dashboard/my-qr';
-    if (pathname !== targetPath) {
-      router.push(targetPath);
-    }
+    if (pathname !== targetPath) router.push(targetPath);
   };
 
-  // Schedule token refresh based on JWT exp
+  // Schedule token refresh based on JWT expiry
   const scheduleTokenRefresh = (token: string) => {
     try {
       const { exp } = decodeJwt(token);
@@ -61,13 +54,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (refreshAt > 0) {
         setTimeout(async () => {
           try {
-            const response = await authService.refreshToken();
-            setAccessToken(response.accessToken);
-            scheduleTokenRefresh(response.accessToken); // reschedule
+            await refreshToken();
           } catch (err) {
             console.error('Token refresh failed:', err);
-            setAccessToken(null);
-            setUser(null);
+            await logout(); // auto-cleanup if refresh fails
           }
         }, refreshAt);
       }
@@ -76,68 +66,81 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Centralized token refresh function
+  /**
+   * Refreshes the authentication token
+   * @returns The new access token or null if refresh failed
+   */
   const refreshToken = async (): Promise<string | null> => {
     try {
-      const response = await authService.refreshToken();
-      if (response?.accessToken) {
-        // Store the token in localStorage for fetchWithAuth
-        localStorage.setItem("accessToken", response.accessToken);
-        
-        // Update state
-        setAccessToken(response.accessToken);
-        scheduleTokenRefresh(response.accessToken);
-        
-        // Update user data
-        try {
-          const currentUser = await authService.getCurrentUser(response.accessToken);
-          setUser(currentUser);
-        } catch (userError) {
-          console.error('Failed to fetch user data:', userError);
-          // Don't fail the whole refresh if user fetch fails
-        }
-        
-        return response.accessToken;
+      const response = await authService.refreshAccessToken();
+      const newToken = response.accessToken;
+      
+      if (!newToken) {
+        throw new Error('No access token received during refresh');
       }
-      return null;
+
+      setAccessToken(newToken);
+      scheduleTokenRefresh(newToken);
+
+      // Update user data if available in the response, otherwise fetch it
+      if (response.user) {
+        setUser(response.user);
+      } else {
+        const currentUser = await authService.getCurrentUser().catch(err => {
+          console.warn('Failed to fetch user data after token refresh:', err);
+          return null;
+        });
+        if (currentUser) setUser(currentUser);
+      }
+
+      return newToken;
     } catch (error) {
       console.error('Token refresh failed:', error);
-      // Clear any invalid tokens
-      localStorage.removeItem("accessToken");
-      setAccessToken(null);
-      setUser(null);
+      // Don't logout automatically on refresh failure to prevent redirect loops
+      // The next API call will trigger a logout if needed
       return null;
     }
   };
 
-  // Initialize auth state on mount
+  // Initialize auth on mount
   useEffect(() => {
+    let isMounted = true;
+    
     const initAuth = async () => {
       try {
-        await refreshToken();
-      } catch (err) {
-        console.log('No valid session found');
-        setUser(null);
-        setAccessToken(null);
+        const refreshTokenValue = authService.getRefreshToken();
+        if (refreshTokenValue) {
+          await refreshToken();
+        } else {
+          console.debug('No refresh token found, user not authenticated');
+        }
+      } catch (error) {
+        console.error('Auth initialization failed:', error);
+        // Don't redirect here to prevent flash of login page
+        // The protected routes will handle redirection if needed
       } finally {
-        setIsLoading(false);
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     };
+
     initAuth();
+    
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const login = async (email: string, password: string) => {
-    try {
-      const response = await authService.login(email, password);
-      setAccessToken(response.accessToken);
-      scheduleTokenRefresh(response.accessToken);
-
-      const currentUser = await authService.getCurrentUser(response.accessToken);
+    const response = await authService.login(email, password);
+    const token = response.accessToken ?? null;
+    if (token) {
+      setAccessToken(token);
+      scheduleTokenRefresh(token);
+      const currentUser = response.user ?? (await authService.getCurrentUser());
       setUser(currentUser);
-
       redirectBasedOnRole(currentUser);
-    } catch (error) {
-      throw error;
     }
   };
 
@@ -148,25 +151,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     password: string;
     intendedUse: ('GENERATOR' | 'RECEIVER')[];
   }) => {
-    try {
-      const response = await authService.signup(data);
-      setAccessToken(response.accessToken);
-      scheduleTokenRefresh(response.accessToken);
-
-      const currentUser = response.user 
-        ? response.user 
-        : await authService.getCurrentUser(response.accessToken);
+    const response = await authService.signup(data);
+    const token = response.accessToken ?? null;
+    if (token) {
+      setAccessToken(token);
+      scheduleTokenRefresh(token);
+      const currentUser = response.user ?? (await authService.getCurrentUser());
       setUser(currentUser);
-
       redirectBasedOnRole(currentUser);
-    } catch (error) {
-      throw error;
     }
   };
 
   const logout = async () => {
     try {
-      await authService.logout(); // backend clears refresh cookie
+      await authService.logout();
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
@@ -179,7 +177,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshUser = async () => {
     if (accessToken) {
       try {
-        const currentUser = await authService.getCurrentUser(accessToken);
+        const currentUser = await authService.getCurrentUser();
         setUser(currentUser);
       } catch (error) {
         console.error('Failed to refresh user:', error);
@@ -211,8 +209,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 }
