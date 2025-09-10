@@ -34,7 +34,7 @@ export default function ScanPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const scannerRef = useRef<QrScanner | null>(null);
 
-  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
@@ -84,7 +84,7 @@ export default function ScanPage() {
       videoRef.current.srcObject = null;
     }
     setIsScanning(false);
-    setIsCameraOpen(false);
+    setIsCameraActive(false);
     setTorchOn(false);
     setTorchSupported(false);
   }, []);
@@ -99,17 +99,22 @@ export default function ScanPage() {
     }
   }, [activeTab, stopCamera]);
 
-  // Restrict desktop usage
+  // Handle tab change to camera on mobile
   useEffect(() => {
-    if (activeTab === "camera" && !isMobile) {
-      toast({
-        title: "Not Allowed",
-        description: "Camera scanning is only available on mobile devices.",
-        variant: "destructive",
-      });
-      setActiveTab("upload");
+    if (activeTab === "camera") {
+      if (!isMobile) {
+        toast({
+          title: "Not Allowed",
+          description: "Camera scanning is only available on mobile devices.",
+          variant: "destructive",
+        });
+        setActiveTab("upload");
+      } else {
+        // Reset camera state when switching to camera tab
+        stopCamera();
+      }
     }
-  }, [activeTab, isMobile, toast]);
+  }, [activeTab, isMobile, toast, stopCamera]);
 
   const enumerateVideoInputs = useCallback(async () => {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -136,7 +141,7 @@ export default function ScanPage() {
   const openCamera = useCallback(async () => {
     try {
       await enumerateVideoInputs();
-      setIsCameraOpen(true);
+      setIsCameraActive(true);
       setIsScanning(true);
 
       const constraints: MediaStreamConstraints = {
@@ -365,7 +370,7 @@ export default function ScanPage() {
 
           {/* CAMERA TAB */}
           <TabsContent value="camera" className="space-y-4">
-            {isMobile ? (
+            {isCameraActive ? (
               <div className="fixed inset-0 bg-black z-50">
                 {/* Video feed */}
                 <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />
@@ -414,8 +419,29 @@ export default function ScanPage() {
                 )}
               </div>
             ) : (
-              <Card className="p-6 text-center">
-                <p className="text-muted-foreground">Camera scanning is only available on mobile devices.</p>
+              <Card className="p-6">
+                <div className="space-y-4 text-center">
+                  <div className="mx-auto w-16 h-16 bg-primary/10 rounded-full flex items-center justify-center">
+                    <Camera className="w-8 h-8 text-primary" />
+                  </div>
+                  <h3 className="text-lg font-medium">Camera Scanner</h3>
+                  <p className="text-muted-foreground text-sm">
+                    Scan QR codes using your device's camera. You'll be asked for camera permissions.
+                  </p>
+                  <Button 
+                    onClick={openCamera} 
+                    className="w-full mt-4"
+                    disabled={isMobile === false}
+                  >
+                    <Camera className="mr-2 h-4 w-4" />
+                    Start Camera
+                  </Button>
+                  {isMobile === false && (
+                    <p className="text-sm text-destructive mt-2">
+                      Camera scanning is only available on mobile devices.
+                    </p>
+                  )}
+                </div>
               </Card>
             )}
           </TabsContent>
