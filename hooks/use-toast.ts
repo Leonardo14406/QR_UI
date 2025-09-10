@@ -5,14 +5,15 @@ import * as React from 'react';
 
 import type { ToastActionElement, ToastProps } from '@/components/ui/toast';
 
-const TOAST_LIMIT = 1;
-const TOAST_REMOVE_DELAY = 1000000;
+const TOAST_LIMIT = 3; // Allow up to 3 toasts to prevent blocking
+const DEFAULT_TOAST_DURATION = 5000; // Default duration: 5 seconds
 
 type ToasterToast = ToastProps & {
   id: string;
   title?: React.ReactNode;
   description?: React.ReactNode;
   action?: ToastActionElement;
+  duration?: number; // Add duration to ToasterToast
 };
 
 const actionTypes = {
@@ -55,7 +56,7 @@ interface State {
 
 const toastTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
-const addToRemoveQueue = (toastId: string) => {
+const addToRemoveQueue = (toastId: string, duration: number = DEFAULT_TOAST_DURATION) => {
   if (toastTimeouts.has(toastId)) {
     return;
   }
@@ -66,7 +67,7 @@ const addToRemoveQueue = (toastId: string) => {
       type: 'REMOVE_TOAST',
       toastId: toastId,
     });
-  }, TOAST_REMOVE_DELAY);
+  }, duration);
 
   toastTimeouts.set(toastId, timeout);
 };
@@ -90,13 +91,11 @@ export const reducer = (state: State, action: Action): State => {
     case 'DISMISS_TOAST': {
       const { toastId } = action;
 
-      // ! Side effects ! - This could be extracted into a dismissToast() action,
-      // but I'll keep it here for simplicity
       if (toastId) {
-        addToRemoveQueue(toastId);
+        addToRemoveQueue(toastId, 0); // Immediate removal on dismiss
       } else {
         state.toasts.forEach((toast) => {
-          addToRemoveQueue(toast.id);
+          addToRemoveQueue(toast.id, toast.duration || DEFAULT_TOAST_DURATION);
         });
       }
 
@@ -139,7 +138,7 @@ function dispatch(action: Action) {
 
 type Toast = Omit<ToasterToast, 'id'>;
 
-function toast({ ...props }: Toast) {
+function toast({ duration, ...props }: Toast) {
   const id = genId();
 
   const update = (props: ToasterToast) =>
@@ -155,11 +154,15 @@ function toast({ ...props }: Toast) {
       ...props,
       id,
       open: true,
+      duration: duration || DEFAULT_TOAST_DURATION,
       onOpenChange: (open) => {
         if (!open) dismiss();
       },
     },
   });
+
+  // Schedule removal based on duration
+  addToRemoveQueue(id, duration || DEFAULT_TOAST_DURATION);
 
   return {
     id: id,

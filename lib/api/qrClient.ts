@@ -126,9 +126,18 @@ export async function fetchWithAuth<T>(
   }
 
   if (!res.ok) {
-    throw new Error(
-      `[fetchWithAuth] ${res.status} ${res.statusText}: ${JSON.stringify(data)}`
-    );
+    // If we have a response with a message, use that as the error message
+    const errorMessage = data?.message || `Request failed with status ${res.status}`;
+    const error = new Error(errorMessage);
+    
+    // Attach the full response to the error object
+    (error as any).response = {
+      status: res.status,
+      statusText: res.statusText,
+      data: data || { message: errorMessage }
+    };
+    
+    throw error;
   }
 
   return data as T;
@@ -206,9 +215,20 @@ export const qrApi = {
     const formData = new FormData();
     formData.append("image", file);
 
-    return fetchWithAuth<ScanResult>(`${API_BASE_URL}/qr/scan-image`, {
-      method: "POST",
-      body: formData,
-    });
+    try {
+      return await fetchWithAuth<ScanResult>(`${API_BASE_URL}/qr/scan-image`, {
+        method: "POST",
+        body: formData,
+      });
+    } catch (error: any) {
+      console.error('Scan image error:', {
+        name: error?.name,
+        message: error?.message,
+        status: error?.response?.status,
+        statusText: error?.response?.statusText,
+        data: error?.response?.data
+      });
+      throw error; // Re-throw to let the caller handle it
+    }
   },
 };
