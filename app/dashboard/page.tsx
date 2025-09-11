@@ -14,7 +14,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (!accessToken) {
       router.push('/login');
-    } else if (user && !user.intendedUse?.includes('GENERATOR')) {
+    } else if (user && !(user.intendedUse?.includes('GENERATOR') || user.intendedUse?.includes('SCANNER'))) {
       // Redirect RECEIVER users to their dedicated page
       router.push('/dashboard/my-qr');
     }

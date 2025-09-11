@@ -5,7 +5,7 @@ export interface User {
   firstName: string;
   lastName: string;
   email: string;
-  intendedUse: ('GENERATOR' | 'RECEIVER')[];
+  intendedUse: ('GENERATOR' | 'RECEIVER' | 'SCANNER')[];
 }
 
 export interface AuthResponse {

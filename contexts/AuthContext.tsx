@@ -40,8 +40,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const redirectBasedOnRole = (user: User) => {
     if (!user) return;
-    const isGenerator = user.intendedUse?.includes('GENERATOR') ?? false;
-    const targetPath = isGenerator ? '/dashboard' : '/dashboard/my-qr';
+    const hasPrivilegedRole = (user.intendedUse?.includes('GENERATOR') ?? false) || (user.intendedUse?.includes('SCANNER') ?? false);
+    const targetPath = hasPrivilegedRole ? '/dashboard' : '/dashboard/my-qr';
     if (pathname !== targetPath) router.push(targetPath);
   };
 

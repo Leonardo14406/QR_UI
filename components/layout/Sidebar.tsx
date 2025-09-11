@@ -39,8 +39,8 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
 
   const sidebarItems = useMemo(() => {
     if (!user) return [];
-    const isGenerator = user.intendedUse?.includes('GENERATOR');
-    return isGenerator ? generatorSidebarItems : receiverSidebarItems;
+    const hasPrivilegedRole = user.intendedUse?.includes('GENERATOR') || user.intendedUse?.includes('SCANNER');
+    return hasPrivilegedRole ? generatorSidebarItems : receiverSidebarItems;
   }, [user]);
 
   const handleLogout = async () => {

@@ -1,4 +1,3 @@
-
 // Scan/page.tsx
 "use client";
 
@@ -11,6 +10,11 @@ import { useToast } from "@/hooks/use-toast";
 import { qrApi } from "@/lib/api/qrClient";
 import type { ScanResult, HumanReadableScan } from "@/lib/api/qr.types";
 import QrScanner from "qr-scanner";
+
+// Configure worker path for qr-scanner so decoding works in the browser
+// The worker file exists in `public/qr-scanner-worker.min.js`
+QrScanner.WORKER_PATH = "/qr-scanner-worker.min.js";
+
 import {
   Camera,
   Upload,
@@ -134,19 +138,10 @@ export default function ScanPage() {
   // Handle tab change to camera on mobile
   useEffect(() => {
     if (activeTab === "camera") {
-      if (!isMobile) {
-        toast({
-          title: "Not Allowed",
-          description: "Camera scanning is only available on mobile devices.",
-          variant: "destructive",
-        });
-        setActiveTab("upload");
-      } else {
-        // Reset camera state when switching to camera tab
-        stopCamera();
-      }
+      // Reset camera state when switching to camera tab
+      stopCamera();
     }
-  }, [activeTab, isMobile, toast, stopCamera]);
+  }, [activeTab, stopCamera]);
 
   const enumerateVideoInputs = useCallback(async () => {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -323,6 +318,13 @@ export default function ScanPage() {
     try {
       setIsCameraActive(true);
       setIsScanning(true);
+      
+      // Ensure we have camera devices and that a camera is available
+      await enumerateVideoInputs();
+      const hasCam = await QrScanner.hasCamera();
+      if (!hasCam) {
+        throw new Error('No camera found on this device.');
+      }
       
       // Request camera access
       const constraints: MediaStreamConstraints = {
@@ -554,16 +556,10 @@ export default function ScanPage() {
                   <Button 
                     onClick={openCamera} 
                     className="w-full mt-4"
-                    disabled={isMobile === false}
                   >
                     <Camera className="mr-2 h-4 w-4" />
                     Start Camera
                   </Button>
-                  {isMobile === false && (
-                    <p className="text-sm text-destructive mt-2">
-                      Camera scanning is only available on mobile devices.
-                    </p>
-                  )}
                 </div>
               </Card>
             )}
