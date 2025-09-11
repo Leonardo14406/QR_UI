@@ -33,9 +33,11 @@ export default function ScanPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scannerRef = useRef<QrScanner | null>(null);
+  const scanFrameRef = useRef<number | null>(null);
 
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [scannerReady, setScannerReady] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
@@ -67,26 +69,56 @@ export default function ScanPage() {
   }, []);
 
   const stopCamera = useCallback(() => {
-    try {
-      if (scannerRef.current) {
+    // Cancel any pending animation frames
+    if (scanFrameRef.current) {
+      cancelAnimationFrame(scanFrameRef.current);
+      scanFrameRef.current = null;
+    }
+
+    // Stop and clean up scanner
+    if (scannerRef.current) {
+      try {
         scannerRef.current.stop();
         scannerRef.current.destroy();
+      } catch (error) {
+        console.error('Error cleaning up scanner:', error);
+      } finally {
         scannerRef.current = null;
       }
-    } catch {}
-    try {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
+    }
+
+    // Stop all media tracks
+    if (streamRef.current) {
+      try {
+        streamRef.current.getTracks().forEach(track => {
+          track.stop();
+          streamRef.current?.removeTrack(track);
+        });
+      } catch (error) {
+        console.error('Error stopping media tracks:', error);
+      } finally {
         streamRef.current = null;
       }
-    } catch {}
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
     }
+
+    // Clean up video element
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.srcObject = null;
+        videoRef.current.load(); // Reset the video element
+      } catch (error) {
+        console.error('Error cleaning up video element:', error);
+      }
+    }
+
+    // Reset states
     setIsScanning(false);
     setIsCameraActive(false);
+    setScannerReady(false);
     setTorchOn(false);
     setTorchSupported(false);
+    lastCodeRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -138,67 +170,72 @@ export default function ScanPage() {
     }
   }, []);
 
-  const openCamera = useCallback(async () => {
+  const initializeScanner = useCallback(async (videoElement: HTMLVideoElement) => {
+    if (!videoElement || scannerRef.current) return;
+
     try {
-      await enumerateVideoInputs();
-      setIsCameraActive(true);
-      setIsScanning(true);
+      // Configure video element
+      videoElement.playsInline = true;
+      videoElement.muted = true;
+      videoElement.setAttribute('playsinline', 'true');
+      videoElement.style.width = '100%';
+      videoElement.style.height = '100%';
+      videoElement.style.objectFit = 'cover';
 
-      const constraints: MediaStreamConstraints = {
-        video: selectedDeviceId
-          ? { deviceId: { exact: selectedDeviceId } }
-          : { facingMode: { ideal: "environment" } },
-        audio: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-
-        const track = stream.getVideoTracks()[0];
-        const caps: any = track.getCapabilities?.();
-        setTorchSupported(!!(caps && "torch" in caps && caps.torch));
-
-        scannerRef.current = new QrScanner(
-          videoRef.current,
-          (res) => {
-            if (!res?.data) return;
-            if (isValidating) return;
-            if (lastCodeRef.current === res.data) return;
-            lastCodeRef.current = res.data;
-            handleValidate(res.data, "camera");
-          },
-          {
-            highlightCodeOutline: true,
-            highlightScanRegion: true,
-            preferredCamera: "environment",
-            calculateScanRegion: (video) => {
-              const s = Math.min(video.videoWidth, video.videoHeight);
-              const size = Math.round((2 / 3) * s);
-              return {
-                x: Math.round((video.videoWidth - size) / 2),
-                y: Math.round((video.videoHeight - size) / 2),
-                width: size,
-                height: size,
-              };
-            },
+      // Create new scanner instance
+      scannerRef.current = new QrScanner(
+        videoElement,
+        (result) => {
+          if (!result?.data) {
+            // No QR code detected in this frame
+            return;
           }
-        );
+          
+          if (isValidating || lastCodeRef.current === result.data) {
+            return; // Skip if already validating or same code
+          }
+          
+          lastCodeRef.current = result.data;
+          handleValidate(result.data, "camera");
+        },
+        {
+          highlightCodeOutline: true,
+          highlightScanRegion: true,
+          preferredCamera: selectedDeviceId ? undefined : 'environment',
+          maxScansPerSecond: 10,
+          returnDetailedScanResult: true,
+          calculateScanRegion: (video) => {
+            const size = Math.min(video.videoWidth, video.videoHeight) * 0.7;
+            return {
+              x: (video.videoWidth - size) / 2,
+              y: (video.videoHeight - size) / 2,
+              width: size,
+              height: size,
+            };
+          },
+          onDecodeError: (error) => {
+            // Ignore 'No QR code found' errors as they're expected
+            if (error !== 'No QR code found') {
+              console.warn('QR Scanner decode error:', error);
+            }
+          },
+        }
+      );
 
-        await scannerRef.current.start();
-      }
-    } catch (err: any) {
-      stopCamera();
+      // Start the scanner
+      await scannerRef.current.start();
+      setScannerReady(true);
+      
+    } catch (error) {
+      console.error('Scanner initialization error:', error);
       toast({
-        title: "Camera Error",
-        description: err?.message || "Unable to access camera. Check permissions and HTTPS.",
-        variant: "destructive",
+        title: 'Scanner Error',
+        description: 'Failed to initialize QR scanner. Please try again.',
+        variant: 'destructive',
       });
+      stopCamera();
     }
-  }, [enumerateVideoInputs, selectedDeviceId, isValidating, stopCamera, toast]);
+  }, [isValidating, stopCamera, toast, selectedDeviceId]);
 
   const handleValidate = useCallback(
     async (code: string, source: "camera" | "upload") => {
@@ -278,6 +315,84 @@ export default function ScanPage() {
     },
     [toast, stopCamera]
   );
+
+  const openCamera = useCallback(async () => {
+    // Clean up any existing camera/scanner
+    stopCamera();
+    
+    try {
+      setIsCameraActive(true);
+      setIsScanning(true);
+      
+      // Request camera access
+      const constraints: MediaStreamConstraints = {
+        video: selectedDeviceId
+          ? { 
+              deviceId: { exact: selectedDeviceId },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              facingMode: undefined
+            }
+          : { 
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 }
+            },
+        audio: false,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+
+      // Set up video element
+      if (!videoRef.current) {
+        throw new Error('Video element not found');
+      }
+      
+      videoRef.current.srcObject = stream;
+      
+      // Wait for video to be ready
+      await new Promise<void>((resolve) => {
+        const onLoadedMetadata = () => {
+          videoRef.current?.removeEventListener('loadedmetadata', onLoadedMetadata);
+          resolve();
+        };
+        
+        videoRef.current?.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+      });
+      
+      await videoRef.current.play().catch(error => {
+        console.error('Video play error:', error);
+        throw new Error('Failed to start camera preview');
+      });
+
+      // Check for torch support
+      const track = stream.getVideoTracks()[0];
+      if (track) {
+        const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+        setTorchSupported(!!(capabilities as any)?.torch);
+      }
+
+      // Initialize scanner after video is ready
+      if (videoRef.current) {
+        await initializeScanner(videoRef.current);
+      }
+      
+    } catch (err: any) {
+      console.error('Camera initialization error:', err);
+      const errorMessage = 
+        err?.name === 'NotAllowedError' ? 'Camera access was denied. Please check your browser permissions.' :
+        err?.name === 'NotFoundError' ? 'No camera found. Please connect a camera and try again.' :
+        err?.message || 'Failed to access camera. Please try again.';
+      
+      stopCamera();
+      toast({
+        title: "Camera Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    }
+  }, [enumerateVideoInputs, selectedDeviceId, isValidating, stopCamera, toast]);
 
   const onChooseFile = useCallback((input: HTMLInputElement | null) => input?.click(), []);
 
@@ -373,7 +488,15 @@ export default function ScanPage() {
             {isCameraActive ? (
               <div className="fixed inset-0 bg-black z-50">
                 {/* Video feed */}
-                <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />
+                <video 
+                  ref={videoRef} 
+                  className="w-full h-full object-cover" 
+                  muted 
+                  playsInline 
+                  disablePictureInPicture
+                  disableRemotePlayback
+                  aria-label="Camera preview for QR code scanning"
+                />
 
                 {/* Scan frame */}
                 <div className="absolute inset-0 flex items-center justify-center">
