@@ -54,6 +54,11 @@ export default function ScanPage() {
 
   const [status, setStatus] = useState<null | { type: "success" | "error" | "info"; message: string }>(null);
 
+  // Continuous scanning controls
+  const [continuousScan, setContinuousScan] = useState(true);
+  const cooldownRef = useRef<number>(800); // ms between validations of different codes
+  const lastScanAtRef = useRef<number>(0);
+
   // Prevent duplicate rapid validations on the same code
   const lastCodeRef = useRef<string | null>(null);
 
@@ -186,11 +191,17 @@ export default function ScanPage() {
             return;
           }
           
-          if (isValidating || lastCodeRef.current === result.data) {
+          const nowTs = Date.now();
+          if (
+            isValidating ||
+            lastCodeRef.current === result.data ||
+            nowTs - lastScanAtRef.current < cooldownRef.current
+          ) {
             return; // Skip if already validating or same code
           }
           
           lastCodeRef.current = result.data;
+          lastScanAtRef.current = nowTs;
           handleValidate(result.data, "camera");
         },
         {
@@ -230,30 +241,39 @@ export default function ScanPage() {
       });
       stopCamera();
     }
-  }, [isValidating, stopCamera, toast, selectedDeviceId]);
+  }, [isValidating, stopCamera, selectedDeviceId]);
+
+  useEffect(() => {
+    const onVisibilityChange = async () => {
+      try {
+        if (document.hidden) {
+          await scannerRef.current?.stop();
+        } else if (isCameraActive) {
+          if (scannerRef.current) {
+            await scannerRef.current.start();
+          } else if (videoRef.current) {
+            await initializeScanner(videoRef.current);
+          }
+        }
+      } catch (e) {
+        console.warn('Visibility resume error:', e);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [isCameraActive, initializeScanner]);
 
   const handleValidate = useCallback(
     async (code: string, source: "camera" | "upload") => {
       setIsValidating(true);
       setStatus(null);
       
-      // Show the scanned code in a toast
-      toast({
-        title: "Scanned Code",
-        description: `Code: ${code}`,
-        variant: "default",
-      });
+      // Optional debug: console.debug("Scanned Code:", code);
 
       try {
         const data: ScanResult = await qrApi.validateQRCode(code);
         
-        // Show the full API response in a toast
-        toast({
-          title: "API Response",
-          description: JSON.stringify(data, null, 2),
-          variant: "default",
-        });
-
         if (!data.qr?.isValid) {
           const message = data.message || "This QR code is invalid or has already been used.";
           setStatus({ type: "error", message });
@@ -294,7 +314,8 @@ export default function ScanPage() {
         setStatus({ type: "success", message: "QR code validated" });
         toast({ title: "QR Validated", description: `Payload: ${humanReadable.payload || "N/A"}` });
 
-        if (source === "camera") stopCamera();
+        // In continuous mode, keep camera running; otherwise close after a successful scan
+        if (source === "camera" && !continuousScan) stopCamera();
       } catch (error: any) {
         const msg = error?.message || "Failed to validate QR code.";
         setStatus({ type: "error", message: msg });
@@ -306,9 +327,15 @@ export default function ScanPage() {
         });
       } finally {
         setIsValidating(false);
+        // Allow the same code to be scanned again after cooldown
+        setTimeout(() => {
+          if (lastCodeRef.current === code) {
+            lastCodeRef.current = null;
+          }
+        }, cooldownRef.current);
       }
     },
-    [toast, stopCamera]
+    [toast, stopCamera, continuousScan]
   );
 
   const openCamera = useCallback(async () => {
@@ -528,6 +555,61 @@ export default function ScanPage() {
                 >
                   Close
                 </button>
+
+                {/* Controls bar */}
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[90%] max-w-2xl">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {/* Camera selector */}
+                    <div className="bg-white/10 backdrop-blur rounded-lg p-2 text-white">
+                      <label className="text-xs opacity-80">Camera</label>
+                      <select
+                        className="w-full bg-black/30 mt-1 p-2 rounded"
+                        value={selectedDeviceId}
+                        onChange={async (e) => {
+                          const id = e.target.value || undefined;
+                          setSelectedDeviceId(id);
+                          // Restart camera with selected device
+                          await openCamera();
+                        }}
+                      >
+                        {videoInputs.length === 0 && <option value="">No cameras</option>}
+                        {videoInputs.map((d) => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label || `Camera (${d.deviceId.slice(0, 6)})`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Torch toggle */}
+                    <div className="bg-white/10 backdrop-blur rounded-lg p-2 text-white flex flex-col">
+                      <label className="text-xs opacity-80">Torch</label>
+                      <Button
+                        type="button"
+                        variant={torchOn ? "default" : "secondary"}
+                        className="mt-1"
+                        disabled={!torchSupported}
+                        onClick={() => applyTorch(!torchOn)}
+                      >
+                        {torchSupported ? (torchOn ? "Turn off" : "Turn on") : "Not supported"}
+                      </Button>
+                    </div>
+
+                    {/* Continuous scanning */}
+                    <div className="bg-white/10 backdrop-blur rounded-lg p-2 text-white">
+                      <label className="text-xs opacity-80">Mode</label>
+                      <div className="mt-1 flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant={continuousScan ? "default" : "secondary"}
+                          onClick={() => setContinuousScan((v) => !v)}
+                        >
+                          {continuousScan ? "Continuous" : "Single-shot"}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
 
                 {/* Status banner */}
                 {status && (
