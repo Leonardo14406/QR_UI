@@ -231,4 +231,8 @@ export const qrApi = {
       throw error; // Re-throw to let the caller handle it
     }
   },
+
+  async getActive(): Promise<{ items: QRCodeResponse[] }> {
+    return fetchWithAuth<{ items: QRCodeResponse[] }>(`${API_BASE_URL}/qr/active`);
+  },
 };

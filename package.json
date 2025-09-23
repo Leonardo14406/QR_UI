@@ -73,7 +73,8 @@
     "tailwindcss-animate": "^1.0.7",
     "typescript": "5.2.2",
     "vaul": "^0.9.9",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "socket.io-client": "^4.7.5"
   },
   "devDependencies": {
     "@types/qrcode": "^1.5.5"

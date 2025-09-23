@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { qrApi } from "@/lib/api/qrClient";
-import type { ScanResult, HumanReadableScan } from "@/lib/api/qr.types";
+import type { ScanResult, HumanReadableScan, QRCodeResponse } from "@/lib/api/qr.types";
 import QrScanner from "qr-scanner";
+import { io, Socket } from "socket.io-client";
+import { useAuth } from "@/contexts/AuthContext";
 
 // Configure worker path for qr-scanner so decoding works in the browser
 // The worker file exists in `public/qr-scanner-worker.min.js`
@@ -29,6 +31,7 @@ import {
 } from "lucide-react";
 
 export default function ScanPage() {
+  const { accessToken } = useAuth();
   const { toast } = useToast();
 
   const [activeTab, setActiveTab] = useState<"camera" | "upload">("camera");
@@ -423,6 +426,81 @@ export default function ScanPage() {
     }
   }, [enumerateVideoInputs, selectedDeviceId, isValidating, stopCamera, toast]);
 
+  const socketRef = useRef<Socket | null>(null);
+
+  // Real-time: connect to backend Socket.IO to receive QR events
+  useEffect(() => {
+    if (!accessToken) return;
+    const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5555";
+
+    // Avoid duplicate connections
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    const socket = io(API_BASE_URL, {
+      transports: ["websocket"],
+      auth: { token: accessToken },
+      withCredentials: true,
+    });
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      // console.debug('[socket] connected', socket.id);
+    });
+
+    socket.on("qr:new", (payload: any) => {
+      const hr = payload?.humanReadable;
+      const qr = payload?.qr as QRCodeResponse | undefined;
+      toast({ title: "New QR Generated", description: hr?.code || qr?.code || "New QR available" });
+      if (qr && qr.type === 'generic' && qr.isValid) {
+        setActiveQrs((prev) => [qr, ...prev.filter(x => x.id !== qr.id)]);
+      }
+    });
+
+    socket.on("qr:validated", (payload: any) => {
+      const hr = payload?.humanReadable;
+      const qr = payload?.qr as QRCodeResponse | undefined;
+      if (hr) {
+        setRecentScans((prev) => [hr, ...prev].slice(0, 20));
+        toast({ title: "QR Validated", description: `Code: ${hr.code}` });
+      }
+      // If a one-time code was validated or code became invalid, remove from active list
+      if (qr) {
+        setActiveQrs((prev) => prev.filter(x => x.id !== qr.id && x.code !== qr.code));
+      }
+    });
+
+    socket.on("disconnect", () => {
+      // console.debug('[socket] disconnected');
+    });
+
+    return () => {
+      socket.off("qr:new");
+      socket.off("qr:validated");
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [accessToken, toast]);
+
+  // Fetch Active QR Codes on load
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await qrApi.getActive();
+        if (!mounted) return;
+        setActiveQrs(res.items || []);
+      } catch (e: any) {
+        console.warn('Failed to load active QR codes:', e?.message || e);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const [activeQrs, setActiveQrs] = useState<QRCodeResponse[]>([]);
+
   const onChooseFile = useCallback((input: HTMLInputElement | null) => input?.click(), []);
 
   const onFileSelected = useCallback(
@@ -721,6 +799,40 @@ export default function ScanPage() {
                       <span>Creator: {scan.creator}</span>
                       <span>•</span>
                       <span>{scan.oneTime ? "One-time" : "Reusable"}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* ACTIVE QR CODES */}
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Active QR Codes</CardTitle>
+            <CardDescription>Valid, non-expired generic codes</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {activeQrs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No active codes.</p>
+            ) : (
+              <div className="space-y-3 max-h-[360px] overflow-y-auto pr-2">
+                {activeQrs.map(qr => (
+                  <div key={qr.id} className="p-3 rounded-lg border bg-card text-card-foreground shadow-sm">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center gap-2 font-medium">
+                        <QrCode className="h-4 w-4 text-primary" />
+                        {qr.code}
+                      </div>
+                      <span className="text-xs text-muted-foreground">Created {formatDate(qr.createdAt)}</span>
+                    </div>
+                    <p className="text-sm">
+                      {typeof qr.payload === 'string' ? qr.payload : (qr.payload as any)?.content || 'N/A'}
+                    </p>
+                    <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>{qr.oneTime ? "One-time" : "Reusable"}</span>
+                      {qr.expiresAt && (<><span>•</span><span>Expires {formatDate(qr.expiresAt)}</span></>)}
                     </div>
                   </div>
                 ))}
