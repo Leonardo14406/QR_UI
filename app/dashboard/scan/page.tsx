@@ -10,12 +10,10 @@ import { useToast } from "@/hooks/use-toast";
 import { qrApi } from "@/lib/api/qrClient";
 import type { ScanResult, HumanReadableScan, QRCodeResponse } from "@/lib/api/qr.types";
 import QrScanner from "qr-scanner";
-import { io, Socket } from "socket.io-client";
 import { useAuth } from "@/contexts/AuthContext";
 
-// Configure worker path for qr-scanner so decoding works in the browser
-// The worker file exists in `public/qr-scanner-worker.min.js`
-QrScanner.WORKER_PATH = "/qr-scanner-worker.min.js";
+// Use CDN worker so decoding works in production without bundling the worker file
+QrScanner.WORKER_PATH = "https://unpkg.com/qr-scanner@1.4.2/qr-scanner-worker.min.js";
 
 import {
   Camera,
@@ -29,6 +27,8 @@ import {
   Scan as ScanIcon,
   QrCode,
 } from "lucide-react";
+
+import type { Socket } from "socket.io-client";
 
 export default function ScanPage() {
   const { accessToken } = useAuth();
@@ -433,53 +433,54 @@ export default function ScanPage() {
     if (!accessToken) return;
     const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5555";
 
-    // Avoid duplicate connections
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
+    let mounted = true;
+    let localSocket: Socket | null = null;
+    (async () => {
+      // Dynamic import ensures the browser build is used and avoids ws optional deps errors
+      const { io } = await import("socket.io-client");
+      if (!mounted) return;
+      const socket = io(API_BASE_URL, {
+        transports: ["websocket"],
+        auth: { token: accessToken },
+        withCredentials: true,
+      });
+      socketRef.current = socket;
+      localSocket = socket;
 
-    const socket = io(API_BASE_URL, {
-      transports: ["websocket"],
-      auth: { token: accessToken },
-      withCredentials: true,
-    });
-    socketRef.current = socket;
+      socket.on("connect", () => {
+        // console.debug('[socket] connected', socket.id);
+      });
 
-    socket.on("connect", () => {
-      // console.debug('[socket] connected', socket.id);
-    });
+      socket.on("qr:new", (payload: any) => {
+        const hr = payload?.humanReadable;
+        const qr = payload?.qr as QRCodeResponse | undefined;
+        toast({ title: "New QR Generated", description: hr?.code || qr?.code || "New QR available" });
+        if (qr && qr.type === 'generic' && qr.isValid) {
+          setActiveQrs((prev) => [qr, ...prev.filter(x => x.id !== qr.id)]);
+        }
+      });
 
-    socket.on("qr:new", (payload: any) => {
-      const hr = payload?.humanReadable;
-      const qr = payload?.qr as QRCodeResponse | undefined;
-      toast({ title: "New QR Generated", description: hr?.code || qr?.code || "New QR available" });
-      if (qr && qr.type === 'generic' && qr.isValid) {
-        setActiveQrs((prev) => [qr, ...prev.filter(x => x.id !== qr.id)]);
-      }
-    });
-
-    socket.on("qr:validated", (payload: any) => {
-      const hr = payload?.humanReadable;
-      const qr = payload?.qr as QRCodeResponse | undefined;
-      if (hr) {
-        setRecentScans((prev) => [hr, ...prev].slice(0, 20));
-        toast({ title: "QR Validated", description: `Code: ${hr.code}` });
-      }
-      // If a one-time code was validated or code became invalid, remove from active list
-      if (qr) {
-        setActiveQrs((prev) => prev.filter(x => x.id !== qr.id && x.code !== qr.code));
-      }
-    });
-
-    socket.on("disconnect", () => {
-      // console.debug('[socket] disconnected');
-    });
+      socket.on("qr:validated", (payload: any) => {
+        const hr = payload?.humanReadable;
+        const qr = payload?.qr as QRCodeResponse | undefined;
+        if (hr) {
+          setRecentScans((prev) => [hr, ...prev].slice(0, 20));
+          toast({ title: "QR Validated", description: `Code: ${hr.code}` });
+        }
+        // If a one-time code was validated or code became invalid, remove from active list
+        if (qr) {
+          setActiveQrs((prev) => prev.filter(x => x.id !== qr.id && x.code !== qr.code));
+        }
+      });
+    })();
 
     return () => {
-      socket.off("qr:new");
-      socket.off("qr:validated");
-      socket.disconnect();
+      mounted = false;
+      if (localSocket) {
+        localSocket.off("qr:new");
+        localSocket.off("qr:validated");
+        localSocket.disconnect();
+      }
       socketRef.current = null;
     };
   }, [accessToken, toast]);
@@ -607,9 +608,20 @@ export default function ScanPage() {
 
                 {/* Scan frame */}
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="relative w-72 h-72">
-                    <div className="absolute -inset-8 bg-black/50 backdrop-blur-[1px]" />
-                    <div className="absolute inset-0 rounded-xl outline outline-[9999px] outline-black/50" />
+                  {/* Instruction chip (WhatsApp Web style) */}
+                  <div className="absolute top-8 left-1/2 -translate-x-1/2">
+                    <div className="px-3 py-1 rounded-full bg-white/10 text-white text-sm backdrop-blur shadow">
+                      Point your camera at a QR code
+                    </div>
+                  </div>
+
+                  {/* Masked square scanning area */}
+                  <div className="relative w-80 h-80">
+                    {/* Outer dark mask */}
+                    <div className="absolute -inset-10 bg-black/50" />
+                    {/* Punch a hole using a giant outline trick */}
+                    <div className="absolute inset-0 rounded-2xl outline outline-[9999px] outline-black/50" />
+                    {/* Corner accents */}
                     <div className="absolute inset-0">
                       {[
                         "top-0 left-0 -translate-x-1/2 -translate-y-1/2 rotate-0",
@@ -617,11 +629,12 @@ export default function ScanPage() {
                         "bottom-0 left-0 -translate-x-1/2 translate-y-1/2 -rotate-90",
                         "bottom-0 right-0 translate-x-1/2 translate-y-1/2 rotate-180",
                       ].map((pos, i) => (
-                        <div key={i} className={`absolute ${pos} w-12 h-12 border-t-4 border-l-4 border-white rounded-tl-xl`} />
+                        <div key={i} className={`absolute ${pos} w-14 h-14 border-t-4 border-l-4 border-white rounded-tl-2xl`} />
                       ))}
                     </div>
-                    <div className="absolute inset-2 overflow-hidden rounded-lg">
-                      <div className="absolute left-0 right-0 h-0.5 bg-green-400 animate-[scan_2s_linear_infinite]" />
+                    {/* Scanning line */}
+                    <div className="absolute inset-3 overflow-hidden rounded-xl">
+                      <div className="absolute left-6 right-6 h-[3px] bg-emerald-400/90 animate-[scan_2s_linear_infinite] shadow-[0_0_12px_rgba(16,185,129,0.8)]" />
                     </div>
                   </div>
                 </div>
