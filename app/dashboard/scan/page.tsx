@@ -52,11 +52,17 @@ export default function ScanPage() {
   // Prevent duplicate rapid validations on the same code
   const lastCodeRef = useRef<string | null>(null);
 
-  // Detect mobile
-  const isMobile = useMemo(() => {
-    if (typeof window === "undefined") return false;
-    return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  }, []);
+  // Deduplicate validation toasts across local validate + realtime events
+  const lastValidatedToastRef = useRef<{ code: string; at: number } | null>(null);
+  const toastValidatedOnce = useCallback((code: string, payload?: string) => {
+    const now = Date.now();
+    const last = lastValidatedToastRef.current;
+    if (last && last.code === code && now - last.at < 2000) {
+      return; // suppress duplicate toasts within 2s for the same code
+    }
+    lastValidatedToastRef.current = { code, at: now };
+    toast({ title: "QR Validated", description: `Code: ${code}` });
+  }, [toast]);
 
   const formatDate = useCallback((d?: string | null) => {
     if (!d) return "N/A";
@@ -140,7 +146,7 @@ export default function ScanPage() {
 
         setRecentScans((prev) => [humanReadable, ...prev].slice(0, 20));
         setStatus({ type: "success", message: "QR code validated" });
-        toast({ title: "QR Validated", description: `Payload: ${humanReadable.payload || "N/A"}` });
+        toastValidatedOnce(humanReadable.code, humanReadable.payload as string | undefined);
 
         // In continuous mode, keep camera running; otherwise close after a successful scan
         if (source === "camera" && !continuousScan) stopCamera();
@@ -163,7 +169,7 @@ export default function ScanPage() {
         }, cooldownRef.current);
       }
     },
-    [toast, stopCamera, continuousScan]
+    [toast, stopCamera, continuousScan, toastValidatedOnce]
   );
 
   const onDecodedFromCamera = useCallback(async (raw: string) => {
@@ -197,9 +203,8 @@ export default function ScanPage() {
       });
 
       socket.on("qr:new", (payload: any) => {
-        const hr = payload?.humanReadable;
         const qr = payload?.qr as QRCodeResponse | undefined;
-        toast({ title: "New QR Generated", description: hr?.code || qr?.code || "New QR available" });
+        // Keep UI state fresh but avoid noisy toasts during scanning
         if (qr && qr.type === 'generic' && qr.isValid) {
           setActiveQrs((prev) => [qr, ...prev.filter(x => x.id !== qr.id)]);
         }
@@ -210,7 +215,7 @@ export default function ScanPage() {
         const qr = payload?.qr as QRCodeResponse | undefined;
         if (hr) {
           setRecentScans((prev) => [hr, ...prev].slice(0, 20));
-          toast({ title: "QR Validated", description: `Code: ${hr.code}` });
+          toastValidatedOnce(hr.code, typeof hr.payload === 'string' ? hr.payload : hr.payload?.content);
         }
         // If a one-time code was validated or code became invalid, remove from active list
         if (qr) {
@@ -301,7 +306,7 @@ export default function ScanPage() {
 
         setRecentScans((prev) => [humanReadable, ...prev].slice(0, 20));
         setStatus({ type: "success", message: "QR from image validated" });
-        toast({ title: "QR Validated", description: `Payload: ${humanReadable.payload || "N/A"}` });
+        toastValidatedOnce(humanReadable.code, humanReadable.payload as string | undefined);
       } catch (error: any) {
         const msg = error?.message || "Failed to process image.";
         setStatus({ type: "error", message: msg });
@@ -314,6 +319,12 @@ export default function ScanPage() {
     },
     [toast]
   );
+
+  // Detect mobile
+  const isMobile = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  }, []);
 
   return (
     <DashboardLayout>
