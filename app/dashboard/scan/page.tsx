@@ -9,11 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { qrApi } from "@/lib/api/qrClient";
 import type { ScanResult, HumanReadableScan, QRCodeResponse } from "@/lib/api/qr.types";
-import QrScanner from "qr-scanner";
 import { useAuth } from "@/contexts/AuthContext";
-
-// Use CDN worker so decoding works in production without bundling the worker file
-QrScanner.WORKER_PATH = "https://unpkg.com/qr-scanner@1.4.2/qr-scanner-worker.min.js";
 
 import {
   Camera,
@@ -29,6 +25,7 @@ import {
 } from "lucide-react";
 
 import type { Socket } from "socket.io-client";
+import { QrScannerWidget } from "@/components/qr/QrScannerWidget";
 
 export default function ScanPage() {
   const { accessToken } = useAuth();
@@ -37,20 +34,10 @@ export default function ScanPage() {
   const [activeTab, setActiveTab] = useState<"camera" | "upload">("camera");
 
   // Camera/Scanner refs & state
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scannerRef = useRef<QrScanner | null>(null);
-  const scanFrameRef = useRef<number | null>(null);
-
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scannerReady, setScannerReady] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
-  const [torchOn, setTorchOn] = useState(false);
-  const [torchSupported, setTorchSupported] = useState(false);
-
-  const [videoInputs, setVideoInputs] = useState<MediaDeviceInfo[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(undefined);
 
   const [recentScans, setRecentScans] = useState<HumanReadableScan[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -81,55 +68,9 @@ export default function ScanPage() {
   }, []);
 
   const stopCamera = useCallback(() => {
-    // Cancel any pending animation frames
-    if (scanFrameRef.current) {
-      cancelAnimationFrame(scanFrameRef.current);
-      scanFrameRef.current = null;
-    }
-
-    // Stop and clean up scanner
-    if (scannerRef.current) {
-      try {
-        scannerRef.current.stop();
-        scannerRef.current.destroy();
-      } catch (error) {
-        console.error('Error cleaning up scanner:', error);
-      } finally {
-        scannerRef.current = null;
-      }
-    }
-
-    // Stop all media tracks
-    if (streamRef.current) {
-      try {
-        streamRef.current.getTracks().forEach(track => {
-          track.stop();
-          streamRef.current?.removeTrack(track);
-        });
-      } catch (error) {
-        console.error('Error stopping media tracks:', error);
-      } finally {
-        streamRef.current = null;
-      }
-    }
-
-    // Clean up video element
-    if (videoRef.current) {
-      try {
-        videoRef.current.pause();
-        videoRef.current.srcObject = null;
-        videoRef.current.load(); // Reset the video element
-      } catch (error) {
-        console.error('Error cleaning up video element:', error);
-      }
-    }
-
-    // Reset states
     setIsScanning(false);
     setIsCameraActive(false);
     setScannerReady(false);
-    setTorchOn(false);
-    setTorchSupported(false);
     lastCodeRef.current = null;
   }, []);
 
@@ -150,122 +91,6 @@ export default function ScanPage() {
       stopCamera();
     }
   }, [activeTab, stopCamera]);
-
-  const enumerateVideoInputs = useCallback(async () => {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const videos = devices.filter((d) => d.kind === "videoinput");
-    setVideoInputs(videos);
-    if (!selectedDeviceId) {
-      const env = videos.find((d) => d.label.toLowerCase().includes("back") || d.label.toLowerCase().includes("rear"));
-      setSelectedDeviceId(env?.deviceId ?? videos[0]?.deviceId);
-    }
-  }, [selectedDeviceId]);
-
-  const applyTorch = useCallback(async (on: boolean) => {
-    const track = streamRef.current?.getVideoTracks?.()[0];
-    if (!track) return;
-    const caps: any = track.getCapabilities?.();
-    if (caps && "torch" in caps && caps.torch) {
-      try {
-        await track.applyConstraints({ advanced: [{ torch: on }] as any });
-        setTorchOn(on);
-      } catch {}
-    }
-  }, []);
-
-  const initializeScanner = useCallback(async (videoElement: HTMLVideoElement) => {
-    if (!videoElement || scannerRef.current) return;
-
-    try {
-      // Configure video element
-      videoElement.playsInline = true;
-      videoElement.muted = true;
-      videoElement.setAttribute('playsinline', 'true');
-      videoElement.style.width = '100%';
-      videoElement.style.height = '100%';
-      videoElement.style.objectFit = 'cover';
-
-      // Create new scanner instance
-      scannerRef.current = new QrScanner(
-        videoElement,
-        (result) => {
-          if (!result?.data) {
-            // No QR code detected in this frame
-            return;
-          }
-          
-          const nowTs = Date.now();
-          if (
-            isValidating ||
-            lastCodeRef.current === result.data ||
-            nowTs - lastScanAtRef.current < cooldownRef.current
-          ) {
-            return; // Skip if already validating or same code
-          }
-          
-          lastCodeRef.current = result.data;
-          lastScanAtRef.current = nowTs;
-          handleValidate(result.data, "camera");
-        },
-        {
-          highlightCodeOutline: true,
-          highlightScanRegion: true,
-          preferredCamera: selectedDeviceId ? undefined : 'environment',
-          maxScansPerSecond: 10,
-          returnDetailedScanResult: true,
-          calculateScanRegion: (video) => {
-            const size = Math.min(video.videoWidth, video.videoHeight) * 0.7;
-            return {
-              x: (video.videoWidth - size) / 2,
-              y: (video.videoHeight - size) / 2,
-              width: size,
-              height: size,
-            };
-          },
-          onDecodeError: (error) => {
-            // Ignore 'No QR code found' errors as they're expected
-            if (error !== 'No QR code found') {
-              console.warn('QR Scanner decode error:', error);
-            }
-          },
-        }
-      );
-
-      // Start the scanner
-      await scannerRef.current.start();
-      setScannerReady(true);
-      
-    } catch (error) {
-      console.error('Scanner initialization error:', error);
-      toast({
-        title: 'Scanner Error',
-        description: 'Failed to initialize QR scanner. Please try again.',
-        variant: 'destructive',
-      });
-      stopCamera();
-    }
-  }, [isValidating, stopCamera, selectedDeviceId]);
-
-  useEffect(() => {
-    const onVisibilityChange = async () => {
-      try {
-        if (document.hidden) {
-          await scannerRef.current?.stop();
-        } else if (isCameraActive) {
-          if (scannerRef.current) {
-            await scannerRef.current.start();
-          } else if (videoRef.current) {
-            await initializeScanner(videoRef.current);
-          }
-        }
-      } catch (e) {
-        console.warn('Visibility resume error:', e);
-      }
-    };
-
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [isCameraActive, initializeScanner]);
 
   const handleValidate = useCallback(
     async (code: string, source: "camera" | "upload") => {
@@ -341,90 +166,10 @@ export default function ScanPage() {
     [toast, stopCamera, continuousScan]
   );
 
-  const openCamera = useCallback(async () => {
-    // Clean up any existing camera/scanner
-    stopCamera();
-    
-    try {
-      setIsCameraActive(true);
-      setIsScanning(true);
-      
-      // Ensure we have camera devices and that a camera is available
-      await enumerateVideoInputs();
-      const hasCam = await QrScanner.hasCamera();
-      if (!hasCam) {
-        throw new Error('No camera found on this device.');
-      }
-      
-      // Request camera access
-      const constraints: MediaStreamConstraints = {
-        video: selectedDeviceId
-          ? { 
-              deviceId: { exact: selectedDeviceId },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
-              facingMode: undefined
-            }
-          : { 
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 }
-            },
-        audio: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream;
-
-      // Set up video element
-      if (!videoRef.current) {
-        throw new Error('Video element not found');
-      }
-      
-      videoRef.current.srcObject = stream;
-      
-      // Wait for video to be ready
-      await new Promise<void>((resolve) => {
-        const onLoadedMetadata = () => {
-          videoRef.current?.removeEventListener('loadedmetadata', onLoadedMetadata);
-          resolve();
-        };
-        
-        videoRef.current?.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
-      });
-      
-      await videoRef.current.play().catch(error => {
-        console.error('Video play error:', error);
-        throw new Error('Failed to start camera preview');
-      });
-
-      // Check for torch support
-      const track = stream.getVideoTracks()[0];
-      if (track) {
-        const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-        setTorchSupported(!!(capabilities as any)?.torch);
-      }
-
-      // Initialize scanner after video is ready
-      if (videoRef.current) {
-        await initializeScanner(videoRef.current);
-      }
-      
-    } catch (err: any) {
-      console.error('Camera initialization error:', err);
-      const errorMessage = 
-        err?.name === 'NotAllowedError' ? 'Camera access was denied. Please check your browser permissions.' :
-        err?.name === 'NotFoundError' ? 'No camera found. Please connect a camera and try again.' :
-        err?.message || 'Failed to access camera. Please try again.';
-      
-      stopCamera();
-      toast({
-        title: "Camera Error",
-        description: errorMessage,
-        variant: "destructive",
-      });
-    }
-  }, [enumerateVideoInputs, selectedDeviceId, isValidating, stopCamera, toast]);
+  const onDecodedFromCamera = useCallback(async (raw: string) => {
+    // Reuse existing validation flow
+    await handleValidate(raw, "camera");
+  }, [handleValidate]);
 
   const socketRef = useRef<Socket | null>(null);
 
@@ -594,128 +339,7 @@ export default function ScanPage() {
           {/* CAMERA TAB */}
           <TabsContent value="camera" className="space-y-4">
             {isCameraActive ? (
-              <div className="fixed inset-0 bg-black z-50">
-                {/* Video feed */}
-                <video 
-                  ref={videoRef} 
-                  className="w-full h-full object-cover" 
-                  muted 
-                  playsInline 
-                  disablePictureInPicture
-                  disableRemotePlayback
-                  aria-label="Camera preview for QR code scanning"
-                />
-
-                {/* Scan frame */}
-                <div className="absolute inset-0 flex items-center justify-center">
-                  {/* Instruction chip (WhatsApp Web style) */}
-                  <div className="absolute top-8 left-1/2 -translate-x-1/2">
-                    <div className="px-3 py-1 rounded-full bg-white/10 text-white text-sm backdrop-blur shadow">
-                      Point your camera at a QR code
-                    </div>
-                  </div>
-
-                  {/* Masked square scanning area */}
-                  <div className="relative w-80 h-80">
-                    {/* Outer dark mask */}
-                    <div className="absolute -inset-10 bg-black/50" />
-                    {/* Punch a hole using a giant outline trick */}
-                    <div className="absolute inset-0 rounded-2xl outline outline-[9999px] outline-black/50" />
-                    {/* Corner accents */}
-                    <div className="absolute inset-0">
-                      {[
-                        "top-0 left-0 -translate-x-1/2 -translate-y-1/2 rotate-0",
-                        "top-0 right-0 translate-x-1/2 -translate-y-1/2 rotate-90",
-                        "bottom-0 left-0 -translate-x-1/2 translate-y-1/2 -rotate-90",
-                        "bottom-0 right-0 translate-x-1/2 translate-y-1/2 rotate-180",
-                      ].map((pos, i) => (
-                        <div key={i} className={`absolute ${pos} w-14 h-14 border-t-4 border-l-4 border-white rounded-tl-2xl`} />
-                      ))}
-                    </div>
-                    {/* Scanning line */}
-                    <div className="absolute inset-3 overflow-hidden rounded-xl">
-                      <div className="absolute left-6 right-6 h-[3px] bg-emerald-400/90 animate-[scan_2s_linear_infinite] shadow-[0_0_12px_rgba(16,185,129,0.8)]" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Close button */}
-                <button
-                  onClick={stopCamera}
-                  className="absolute top-6 right-6 bg-red-600 text-white px-3 py-2 rounded-xl shadow"
-                >
-                  Close
-                </button>
-
-                {/* Controls bar */}
-                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[90%] max-w-2xl">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {/* Camera selector */}
-                    <div className="bg-white/10 backdrop-blur rounded-lg p-2 text-white">
-                      <label className="text-xs opacity-80">Camera</label>
-                      <select
-                        className="w-full bg-black/30 mt-1 p-2 rounded"
-                        value={selectedDeviceId}
-                        onChange={async (e) => {
-                          const id = e.target.value || undefined;
-                          setSelectedDeviceId(id);
-                          // Restart camera with selected device
-                          await openCamera();
-                        }}
-                      >
-                        {videoInputs.length === 0 && <option value="">No cameras</option>}
-                        {videoInputs.map((d) => (
-                          <option key={d.deviceId} value={d.deviceId}>
-                            {d.label || `Camera (${d.deviceId.slice(0, 6)})`}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Torch toggle */}
-                    <div className="bg-white/10 backdrop-blur rounded-lg p-2 text-white flex flex-col">
-                      <label className="text-xs opacity-80">Torch</label>
-                      <Button
-                        type="button"
-                        variant={torchOn ? "default" : "secondary"}
-                        className="mt-1"
-                        disabled={!torchSupported}
-                        onClick={() => applyTorch(!torchOn)}
-                      >
-                        {torchSupported ? (torchOn ? "Turn off" : "Turn on") : "Not supported"}
-                      </Button>
-                    </div>
-
-                    {/* Continuous scanning */}
-                    <div className="bg-white/10 backdrop-blur rounded-lg p-2 text-white">
-                      <label className="text-xs opacity-80">Mode</label>
-                      <div className="mt-1 flex items-center gap-2">
-                        <Button
-                          type="button"
-                          variant={continuousScan ? "default" : "secondary"}
-                          onClick={() => setContinuousScan((v) => !v)}
-                        >
-                          {continuousScan ? "Continuous" : "Single-shot"}
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Status banner */}
-                {status && (
-                  <div
-                    className={`absolute top-6 left-1/2 -translate-x-1/2 rounded-full px-3 py-1 text-sm font-medium shadow ${
-                      status.type === "success" ? "bg-emerald-600 text-white" : "bg-red-600 text-white"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      {status.type === "success" ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-                      <span>{status.message}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
+              <QrScannerWidget onDecoded={onDecodedFromCamera} onClose={stopCamera} />
             ) : (
               <Card className="p-6">
                 <div className="space-y-4 text-center">
@@ -727,7 +351,7 @@ export default function ScanPage() {
                     Scan QR codes using your device's camera. You'll be asked for camera permissions.
                   </p>
                   <Button 
-                    onClick={openCamera} 
+                    onClick={() => setIsCameraActive(true)}
                     className="w-full mt-4"
                   >
                     <Camera className="mr-2 h-4 w-4" />
