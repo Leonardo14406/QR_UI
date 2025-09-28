@@ -350,7 +350,11 @@ export default function ScanPage() {
           {/* CAMERA TAB */}
           <TabsContent value="camera" className="space-y-4">
             {isCameraActive ? (
-              <QrScannerWidget onDecoded={onDecodedFromCamera} onClose={stopCamera} />
+              <QrScannerWidget 
+                onDecoded={onDecodedFromCamera} 
+                onClose={stopCamera}
+                paused={isValidating}
+              />
             ) : (
               <Card className="p-6">
                 <div className="space-y-4 text-center">

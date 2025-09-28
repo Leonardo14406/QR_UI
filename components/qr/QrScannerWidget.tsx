@@ -1,46 +1,71 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DecodeHintType, NotFoundException } from "@zxing/library";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserMultiFormatReader, IScannerControls } from "@zxing/browser";
+import { DecodeHintType, NotFoundException } from "@zxing/library";
 import { Button } from "@/components/ui/button";
-import { QrCode, CheckCircle2, XCircle, Camera, Loader2 } from "lucide-react";
+import { QrCode } from "lucide-react";
 
 interface QrScannerWidgetProps {
   onDecoded: (text: string) => void;
   onClose: () => void;
+  paused?: boolean;
 }
 
 /**
- * A robust scanner widget built on ZXing that works reliably on desktop and mobile.
+ * ZXing-based scanner widget with:
  * - Device selection
  * - Torch toggle (when supported)
- * - Debounced/continuous scanning with cooldown to prevent duplicates
+ * - High-resolution constraints (improves printed ticket scans)
+ * - Zoom slider (when supported)
+ * - Debounce to prevent duplicate decodes
  */
-export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
+export function QrScannerWidget({ onDecoded, onClose, paused = false }: QrScannerWidgetProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(undefined);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>();
   const [isStarting, setIsStarting] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [continuous, setContinuous] = useState(true);
+  const [zoomSupported, setZoomSupported] = useState(false);
+  const [zoom, setZoom] = useState<number | undefined>(undefined);
+  const [zoomRange, setZoomRange] = useState<{ min: number; max: number; step: number } | null>(null);
 
   // Cooldown/duplicate protection
   const lastCodeRef = useRef<string | null>(null);
   const lastScanAtRef = useRef<number>(0);
   const cooldownMsRef = useRef<number>(800);
 
+  // Region-of-interest (ROI): accept only codes whose centroid lies in the central square
+  // The fraction represents the size of the central square relative to the smaller video dimension
+  const roiFractionRef = useRef<number>(0.6);
+
+  const isInRoi = useCallback(() => {
+    const video = videoRef.current;
+    const vw = video?.videoWidth || video?.clientWidth || 0;
+    const vh = video?.videoHeight || video?.clientHeight || 0;
+    if (!vw || !vh) {
+      // If unknown, don't block: allow all detections
+      return (_cx: number, _cy: number) => true;
+    }
+    const size = Math.min(vw, vh) * roiFractionRef.current;
+    const x0 = (vw - size) / 2;
+    const y0 = (vh - size) / 2;
+    const x1 = x0 + size;
+    const y1 = y0 + size;
+    return (cx: number, cy: number) => cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1;
+  }, []);
+
   const enumerate = useCallback(async () => {
     const mediaDevices = await navigator.mediaDevices.enumerateDevices();
     const vids = mediaDevices.filter((d) => d.kind === "videoinput");
     setDevices(vids);
     if (!selectedDeviceId) {
-      const env = vids.find((d) => /back|rear/i.test(d.label));
-      setSelectedDeviceId(env?.deviceId || vids[0]?.deviceId || undefined);
+      const env = vids.find((d) => /back|rear|environment/i.test(d.label));
+      setSelectedDeviceId(env?.deviceId || vids[0]?.deviceId);
     }
   }, [selectedDeviceId]);
 
@@ -49,7 +74,7 @@ export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
       controlsRef.current?.stop();
     } catch {}
     controlsRef.current = null;
-    codeReaderRef.current = null;
+
     try {
       const stream = videoRef.current?.srcObject as MediaStream | null;
       stream?.getTracks()?.forEach((t) => t.stop());
@@ -59,8 +84,12 @@ export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
         videoRef.current.load();
       }
     } catch {}
+
     setTorchOn(false);
     setTorchSupported(false);
+    setZoom(undefined);
+    setZoomSupported(false);
+    setZoomRange(null);
   }, []);
 
   const applyTorch = useCallback(async (on: boolean) => {
@@ -73,23 +102,69 @@ export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
     } catch {}
   }, []);
 
+  const applyZoom = useCallback(async (value: number) => {
+    try {
+      const track = (videoRef.current?.srcObject as MediaStream | null)?.getVideoTracks?.()[0];
+      const caps: any = track?.getCapabilities?.();
+      if (!track || !caps || !("zoom" in caps)) return;
+      await track.applyConstraints({ advanced: [{ zoom: value }] as any });
+      setZoom(value);
+    } catch {}
+  }, []);
+
   const start = useCallback(async () => {
     if (!videoRef.current) return;
     setIsStarting(true);
     try {
-      // Hints for better performance
-      const hints = new Map();
+      // Hints for better performance on printed codes
+      const hints = new Map<DecodeHintType, any>();
       hints.set(DecodeHintType.TRY_HARDER, true);
 
       const reader = new BrowserMultiFormatReader(hints);
-      codeReaderRef.current = reader;
 
-      // Start decoding from selected device
-      const controls = await reader.decodeFromVideoDevice(
-        selectedDeviceId,
+      // High-res constraints help with printed small modules
+      const constraints: MediaStreamConstraints = {
+        video: selectedDeviceId
+          ? ({
+              deviceId: { exact: selectedDeviceId },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30 },
+              advanced: [
+                { focusMode: "continuous" as any },
+                { exposureMode: "continuous" as any },
+              ],
+            } as unknown as MediaTrackConstraints)
+          : ({
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30 },
+              advanced: [
+                { focusMode: "continuous" as any },
+                { exposureMode: "continuous" as any },
+              ],
+            } as unknown as MediaTrackConstraints),
+        audio: false,
+      };
+
+      // Use decodeFromConstraints to pass our media constraints
+      const controls = await reader.decodeFromConstraints(
+        constraints as any,
         videoRef.current,
-        (result, err, scannerControls, ..._extra) => {
+        (result, err, c) => {
           if (result?.getText) {
+            // ROI filter: only accept if centroid lies within central square
+            const pts = (result as any).getResultPoints?.() as Array<{ getX: () => number; getY: () => number }> | undefined;
+            if (pts && pts.length) {
+              const cx = pts.reduce((s, p) => s + p.getX(), 0) / pts.length;
+              const cy = pts.reduce((s, p) => s + p.getY(), 0) / pts.length;
+              const within = isInRoi()(cx, cy);
+              if (!within) {
+                return; // ignore detections outside ROI
+              }
+            }
+
             const text = result.getText();
             const now = Date.now();
             if (
@@ -101,28 +176,41 @@ export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
             lastCodeRef.current = text;
             lastScanAtRef.current = now;
             onDecoded(text);
+            // If not in continuous mode, stop scanning after a valid in-ROI detection
             if (!continuous) {
-              // Stop after first valid decode in single-shot mode
-              scannerControls?.stop();
+              c?.stop();
             }
           } else if (err && !(err instanceof NotFoundException)) {
-            // Non-"not found" errors can be logged if needed
             // console.warn('Decode error:', err);
           }
         }
       );
       controlsRef.current = controls;
 
-      // Torch support check
+      // Capability checks for torch & zoom
       try {
         const track = (videoRef.current.srcObject as MediaStream)?.getVideoTracks?.()[0];
         const caps: any = track?.getCapabilities?.();
-        setTorchSupported(!!caps?.torch);
+        if (caps) {
+          setTorchSupported(!!caps.torch);
+          if (typeof caps.zoom === "number") {
+            setZoomSupported(true);
+            setZoomRange({ min: 1, max: caps.zoom, step: 0.1 });
+            // Set a modest initial zoom if supported to help small printed codes
+            const initZoom = Math.min(2, caps.zoom || 1);
+            await applyZoom(initZoom);
+          } else if (caps.zoom && typeof caps.zoom.min === "number") {
+            setZoomSupported(true);
+            setZoomRange({ min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 });
+            const initZoom = Math.min(2, caps.zoom.max || 1);
+            await applyZoom(initZoom);
+          }
+        }
       } catch {}
     } finally {
       setIsStarting(false);
     }
-  }, [onDecoded, selectedDeviceId, continuous]);
+  }, [onDecoded, selectedDeviceId, continuous, applyZoom]);
 
   useEffect(() => {
     enumerate();
@@ -134,6 +222,15 @@ export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
     stop();
     start();
   }, [selectedDeviceId, start, stop]);
+
+  useEffect(() => {
+    // Pause/resume scanning when parent toggles `paused`
+    if (paused) {
+      controlsRef.current?.stop();
+    } else {
+      start();
+    }
+  }, [paused, start]);
 
   // Visibility pause/resume
   useEffect(() => {
@@ -206,7 +303,7 @@ export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
             <label className="text-xs opacity-80">Camera</label>
             <select
               className="w-full bg-black/30 mt-1 p-2 rounded"
-              value={selectedDeviceId ?? ""}
+              value={selectedDeviceId}
               onChange={(e) => setSelectedDeviceId(e.target.value || undefined)}
             >
               {devices.length === 0 && <option value="">No cameras</option>}
@@ -232,17 +329,23 @@ export function QrScannerWidget({ onDecoded, onClose }: QrScannerWidgetProps) {
             </Button>
           </div>
 
-          {/* Mode toggle */}
+          {/* Zoom */}
           <div className="bg-white/10 backdrop-blur rounded-lg p-2 text-white">
-            <label className="text-xs opacity-80">Mode</label>
+            <label className="text-xs opacity-80">Zoom</label>
             <div className="mt-1 flex items-center gap-2">
-              <Button
-                type="button"
-                variant={continuous ? "default" : "secondary"}
-                onClick={() => setContinuous((v) => !v)}
-              >
-                {continuous ? "Continuous" : "Single-shot"}
-              </Button>
+              {zoomSupported && zoomRange ? (
+                <input
+                  type="range"
+                  min={zoomRange.min}
+                  max={zoomRange.max}
+                  step={zoomRange.step}
+                  value={zoom ?? zoomRange.min}
+                  onChange={(e) => applyZoom(parseFloat(e.target.value))}
+                  className="w-full"
+                />
+              ) : (
+                <div className="text-xs opacity-70">Not supported</div>
+              )}
             </div>
           </div>
         </div>

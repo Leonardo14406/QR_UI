@@ -20,6 +20,13 @@ const nextConfig = {
         bufferutil: false,
         'utf-8-validate': false,
       };
+      // Force engine.io-client to use browser websocket transport
+      config.resolve.alias = {
+        ...(config.resolve.alias || {}),
+        'engine.io-client/build/esm/transports/websocket.node.js': 'engine.io-client/build/esm/transports/websocket.js',
+        'engine.io-client/build/esm-debug/transports/websocket.node.js': 'engine.io-client/build/esm-debug/transports/websocket.js',
+        ws: false,
+      };
     }
     return config;
   },
